@@ -99,7 +99,7 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema",
+ "arrow-schema 26.0.0",
  "arrow-select",
  "bitflags",
  "chrono",
@@ -128,7 +128,7 @@ dependencies = [
  "ahash 0.8.2",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema",
+ "arrow-schema 26.0.0",
  "chrono",
  "half 2.1.0",
  "hashbrown",
@@ -152,7 +152,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d916feee158c485dad4f701cba31bc9a90a8db87d9df8e2aa8adc0c20a2bbb9"
 dependencies = [
  "arrow-buffer",
- "arrow-schema",
+ "arrow-schema 26.0.0",
  "half 2.1.0",
  "num",
 ]
@@ -162,6 +162,12 @@ name = "arrow-schema"
 version = "26.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0f9406eb7834ca6bd8350d1baa515d18b9fcec487eddacfb62f5e19511f7bd37"
+
+[[package]]
+name = "arrow-schema"
+version = "28.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da9f143882a80be168538a60e298546314f50f11f2a288c8d73e11108da39d26"
 dependencies = [
  "serde",
 ]
@@ -175,7 +181,7 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
- "arrow-schema",
+ "arrow-schema 26.0.0",
  "num",
 ]
 
@@ -827,7 +833,7 @@ dependencies = [
  "ahash 0.8.2",
  "arrow",
  "arrow-buffer",
- "arrow-schema",
+ "arrow-schema 26.0.0",
  "blake2",
  "blake3",
  "chrono",
@@ -944,7 +950,7 @@ dependencies = [
 name = "deltalake-python"
 version = "0.6.4"
 dependencies = [
- "arrow-schema",
+ "arrow-schema 28.0.0",
  "chrono",
  "deltalake",
  "env_logger 0.10.0",
