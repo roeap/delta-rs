@@ -30,7 +30,7 @@ arrow-ord = { version = "49" }
 arrow-row = { version = "49" }
 arrow-schema = { version = "49" }
 arrow-select = { version = "49" }
-object_store = { version = "0.8" }
+object_store = { version = "0.9" }
 parquet = { version = "49" }
 
 # datafusion
