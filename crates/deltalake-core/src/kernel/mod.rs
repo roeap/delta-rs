@@ -3,6 +3,7 @@
 //! The Kernel module contains all the logic for reading and processing the Delta Lake transaction log.
 
 pub mod arrow;
+mod checkpoint;
 pub mod error;
 pub mod expressions;
 pub mod models;

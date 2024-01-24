@@ -70,6 +70,9 @@ pub enum Error {
 
     #[error("Failed to parse value '{0}' as '{1}'")]
     Parse(String, DataType),
+
+    #[error(transparent)]
+    CheckpointError(#[from] super::checkpoint::CheckpointError),
 }
 
 #[cfg(feature = "object_store")]
