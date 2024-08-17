@@ -20,7 +20,7 @@ delta_kernel.workspace = true
 # arrow
 arrow = { workspace = true }
 arrow-arith = { workspace = true }
-arrow-array = { workspace = true , features = ["chrono-tz"]}
+arrow-array = { workspace = true, features = ["chrono-tz"] }
 arrow-buffer = { workspace = true }
 arrow-cast = { workspace = true }
 arrow-ipc = { workspace = true }
@@ -29,16 +29,14 @@ arrow-ord = { workspace = true }
 arrow-row = { workspace = true }
 arrow-schema = { workspace = true, features = ["serde"] }
 arrow-select = { workspace = true }
-parquet = { workspace = true, features = [
-    "async",
-    "object_store",
-] }
+parquet = { workspace = true, features = ["async", "object_store"] }
 pin-project-lite = "^0.2.7"
 
 # datafusion
 datafusion = { workspace = true, optional = true }
-datafusion-expr = { workspace = true, optional = true }
+datafusion-catalog = { workspace = true, optional = true }
 datafusion-common = { workspace = true, optional = true }
+datafusion-expr = { workspace = true, optional = true }
 datafusion-proto = { workspace = true, optional = true }
 datafusion-sql = { workspace = true, optional = true }
 datafusion-physical-expr = { workspace = true, optional = true }
@@ -58,7 +56,7 @@ regex = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v4"] }
 url = { workspace = true }
-urlencoding = { workspace = true}
+urlencoding = { workspace = true }
 
 # runtime
 async-trait = { workspace = true }
@@ -125,6 +123,7 @@ default = ["cdf"]
 datafusion = [
     "dep:datafusion",
     "datafusion-expr",
+    "datafusion-catalog",
     "datafusion-common",
     "datafusion-proto",
     "datafusion-physical-expr",

@@ -36,7 +36,6 @@ use arrow_schema::{
 use arrow_select::concat::concat_batches;
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
-use datafusion::catalog::{Session, TableProviderFactory};
 use datafusion::config::TableParquetOptions;
 use datafusion::datasource::physical_plan::parquet::ParquetExecBuilder;
 use datafusion::datasource::physical_plan::{
@@ -47,6 +46,7 @@ use datafusion::execution::context::{SessionConfig, SessionContext, SessionState
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::execution::FunctionRegistry;
 use datafusion::physical_optimizer::pruning::PruningPredicate;
+use datafusion_catalog::{Session, TableProviderFactory};
 use datafusion_common::scalar::ScalarValue;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::{
@@ -76,9 +76,7 @@ use url::Url;
 use crate::delta_datafusion::expr::parse_predicate_expression;
 use crate::delta_datafusion::schema_adapter::DeltaSchemaAdapterFactory;
 use crate::errors::{DeltaResult, DeltaTableError};
-use crate::kernel::{
-    Add, DataCheck, EagerSnapshot, Invariant, LogicalFile, Snapshot, StructTypeExt,
-};
+use crate::kernel::{Add, DataCheck, EagerSnapshot, Invariant, Snapshot, StructTypeExt};
 use crate::logstore::LogStoreRef;
 use crate::table::builder::ensure_table_uri;
 use crate::table::state::DeltaTableState;

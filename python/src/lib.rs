@@ -24,7 +24,6 @@ use deltalake::datafusion::catalog::TableProvider;
 use deltalake::datafusion::datasource::memory::MemTable;
 use deltalake::datafusion::physical_plan::ExecutionPlan;
 use deltalake::datafusion::prelude::SessionContext;
-use deltalake::delta_datafusion::cdf::FileAction;
 use deltalake::delta_datafusion::DeltaDataChecker;
 use deltalake::errors::DeltaTableError;
 use deltalake::kernel::{

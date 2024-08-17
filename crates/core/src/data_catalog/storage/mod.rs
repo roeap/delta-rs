@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
-use datafusion::catalog::SchemaProvider;
 use datafusion::datasource::TableProvider;
+use datafusion_catalog::SchemaProvider;
 use datafusion_common::DataFusionError;
 use futures::TryStreamExt;
 use object_store::ObjectStore;
