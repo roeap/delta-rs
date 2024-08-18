@@ -761,20 +761,6 @@ fn to_count_field(field: &StructField) -> Option<StructField> {
     }
 }
 
-#[cfg(feature = "datafusion")]
-mod datafusion {
-    use datafusion_common::stats::Statistics;
-
-    use super::*;
-
-    impl EagerSnapshot {
-        /// Provide table level statistics to Datafusion
-        pub fn datafusion_table_statistics(&self) -> Option<Statistics> {
-            self.log_data().statistics()
-        }
-    }
-}
-
 /// Retrieves a specific field from the schema based on the provided field name.
 /// It handles cases where the field name is nested or enclosed in backticks.
 fn get_stats_field<'a>(schema: &'a StructType, stats_field_name: &str) -> Option<&'a StructField> {

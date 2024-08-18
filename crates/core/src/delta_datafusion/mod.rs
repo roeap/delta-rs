@@ -270,13 +270,6 @@ pub(crate) fn get_path_column<'a>(
         .ok_or_else(err)
 }
 
-impl DeltaTableState {
-    /// Provide table level statistics to Datafusion
-    pub fn datafusion_table_statistics(&self) -> Option<Statistics> {
-        self.snapshot.datafusion_table_statistics()
-    }
-}
-
 // each delta table must register a specific object store, since paths are internally
 // handled relative to the table root.
 pub(crate) fn register_store(store: LogStoreRef, env: Arc<RuntimeEnv>) {
@@ -633,7 +626,8 @@ impl<'a> DeltaScanBuilder<'a> {
 
         let stats = self
             .snapshot
-            .datafusion_table_statistics()
+            .log_data()
+            .statistics()
             .unwrap_or(Statistics::new_unknown(&schema));
 
         let parquet_options = TableParquetOptions {
@@ -735,7 +729,7 @@ impl TableProvider for DeltaTable {
     }
 
     fn statistics(&self) -> Option<Statistics> {
-        self.snapshot().ok()?.datafusion_table_statistics()
+        self.snapshot().ok()?.log_data().statistics()
     }
 }
 
@@ -823,7 +817,7 @@ impl TableProvider for DeltaTableProvider {
     }
 
     fn statistics(&self) -> Option<Statistics> {
-        self.snapshot.datafusion_table_statistics()
+        self.snapshot.log_data().statistics()
     }
 }
 

@@ -299,7 +299,7 @@ mod local {
     async fn test_datafusion_stats() -> Result<()> {
         // Validate a table that contains statisitics for all files
         let table = open_table("../test/tests/data/delta-0.8.0").await.unwrap();
-        let statistics = table.snapshot()?.datafusion_table_statistics().unwrap();
+        let statistics = table.snapshot()?.log_data().statistics().unwrap();
 
         assert_eq!(statistics.num_rows, Precision::Exact(4));
 
@@ -337,7 +337,7 @@ mod local {
 
         // Validate a table that does not contain column statisitics
         let table = open_table("../test/tests/data/delta-0.2.0").await.unwrap();
-        let statistics = table.snapshot()?.datafusion_table_statistics().unwrap();
+        let statistics = table.snapshot()?.log_data().statistics().unwrap();
 
         assert_eq!(statistics.num_rows, Precision::Absent);
 
@@ -376,7 +376,7 @@ mod local {
             .await
             .unwrap();
         let schema = table.get_schema().unwrap();
-        let statistics = table.snapshot()?.datafusion_table_statistics().unwrap();
+        let statistics = table.snapshot()?.log_data().statistics().unwrap();
         assert_eq!(statistics.num_rows, Precision::Exact(12));
 
         // `new_column` statistics
