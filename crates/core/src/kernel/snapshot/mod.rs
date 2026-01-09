@@ -492,7 +492,7 @@ impl Snapshot {
 /// A snapshot of a Delta table that has been eagerly loaded into memory.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EagerSnapshot {
-    snapshot: Arc<Snapshot>,
+    pub(crate) snapshot: Arc<Snapshot>,
     // logical files in the snapshot
     files: Vec<RecordBatch>,
 }

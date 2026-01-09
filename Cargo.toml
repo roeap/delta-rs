@@ -43,6 +43,7 @@ datafusion = { version = "52.1.0" }
 datafusion-datasource = { version = "52.1.0" }
 datafusion-ffi = { version = "52.1.0" }
 datafusion-proto = { version = "52.1.0" }
+datafusion-tracing = { version = "52.0.0" }
 
 # serde
 serde = { version = "1.0.194", features = ["derive"] }

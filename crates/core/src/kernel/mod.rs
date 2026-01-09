@@ -32,13 +32,9 @@ where
     R: Send + 'static,
 {
     // Capture the current dispatcher and span
-    let dispatch = dispatcher::get_default(|d| d.clone());
     let span = Span::current();
-
     tokio::task::spawn_blocking(move || {
-        dispatcher::with_default(&dispatch, || {
-            let _enter = span.enter();
-            f()
-        })
+        let _guard = span.enter();
+        f()
     })
 }

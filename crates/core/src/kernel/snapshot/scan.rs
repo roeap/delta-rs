@@ -10,6 +10,7 @@ use delta_kernel::{Engine, EngineData, PredicateRef, SnapshotRef, Version};
 use futures::Stream;
 use futures::future::ready;
 use futures::stream::once;
+use tracing::instrument;
 use url::Url;
 
 use crate::DeltaResult;
@@ -132,6 +133,7 @@ impl Scan {
         self.inner.physical_predicate()
     }
 
+    #[instrument(skip_all, level = "info")]
     pub fn scan_metadata(&self, engine: Arc<dyn Engine>) -> SendableScanMetadataStream {
         // TODO: which capacity to choose?
         let mut builder = ReceiverStreamBuilder::<ScanMetadata>::new(100);
@@ -151,6 +153,7 @@ impl Scan {
         builder.build()
     }
 
+    #[instrument(skip_all, level = "info")]
     pub fn scan_metadata_from<T: Iterator<Item = RecordBatch> + Send + 'static>(
         &self,
         engine: Arc<dyn Engine>,

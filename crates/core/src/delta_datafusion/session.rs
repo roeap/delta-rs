@@ -19,6 +19,25 @@ use crate::delta_datafusion::planner::DeltaPlanner;
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::logstore::LogStore;
 
+#[cfg(feature = "tracing")]
+pub(crate) static INSTRUMENT_RULE: std::sync::LazyLock<
+    Arc<dyn datafusion::physical_optimizer::PhysicalOptimizerRule + Send + Sync>,
+> = std::sync::LazyLock::new(|| {
+    use datafusion_tracing::{instrument_with_info_spans, pretty_format_compact_batch};
+
+    let options = datafusion_tracing::InstrumentationOptions::builder()
+        .record_metrics(true)
+        .preview_limit(5)
+        .preview_fn(Arc::new(|batch: &arrow_array::RecordBatch| {
+            pretty_format_compact_batch(batch, 64, 3, 10).map(|fmt| fmt.to_string())
+        }))
+        .build();
+
+    instrument_with_info_spans!(
+        options: options,
+    )
+});
+
 pub fn create_session() -> DeltaSessionContext {
     DeltaSessionContext::default()
 }
@@ -327,14 +346,16 @@ impl DeltaSessionContext {
 
     fn new_with_config_and_runtime(config: SessionConfig, runtime_env: Arc<RuntimeEnv>) -> Self {
         let planner = DeltaPlanner::new();
-        let state = SessionStateBuilder::new()
+        let builder = SessionStateBuilder::new()
             .with_default_features()
             .with_config(config)
             .with_runtime_env(runtime_env)
-            .with_query_planner(planner)
-            .build();
+            .with_query_planner(planner);
 
-        let inner = SessionContext::new_with_state(state);
+        #[cfg(feature = "tracing")]
+        let builder = builder.with_physical_optimizer_rule(INSTRUMENT_RULE.clone());
+
+        let inner = SessionContext::new_with_state(builder.build());
         Self { inner }
     }
 

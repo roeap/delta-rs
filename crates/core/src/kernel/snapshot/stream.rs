@@ -7,7 +7,7 @@ use std::pin::Pin;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinSet;
 use tracing::Span;
-use tracing::dispatcher;
+use tracing::instrument;
 
 use crate::DeltaTableError;
 use crate::errors::DeltaResult;
@@ -103,20 +103,16 @@ impl<O: Send + 'static> ReceiverStreamBuilder<O> {
     ///
     /// This is often used to spawn tasks that write to the sender
     /// retrieved from `Self::tx`.
+    #[instrument(skip(self, f))]
     pub fn spawn_blocking<F>(&mut self, f: F)
     where
         F: FnOnce() -> DeltaResult<()>,
         F: Send + 'static,
     {
-        // Capture the current dispatcher and span
-        let dispatch = dispatcher::get_default(|d| d.clone());
         let span = Span::current();
-
         self.join_set.spawn_blocking(move || {
-            dispatcher::with_default(&dispatch, || {
-                let _enter = span.enter();
-                f()
-            })
+            let _guard = span.enter();
+            f()
         });
     }
 

@@ -768,7 +768,7 @@ impl TableProviderBuilder {
             }
         };
 
-        let mut provider = next::DeltaScan::new(snapshot, config)?;
+        let mut provider = next::DeltaScan::try_new(snapshot, config)?;
         if let Some(skipping) = self.file_skipping_predicates {
             // validate that the expressions contain no illegal variants
             // that are not eligible for file skipping, e.g. volatile functions.

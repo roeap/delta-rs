@@ -38,6 +38,7 @@ object_store = { workspace = true }
 datafusion = { workspace = true, optional = true }
 datafusion-datasource = { workspace = true, optional = true }
 datafusion-proto = { workspace = true, optional = true }
+datafusion-tracing = { workspace = true, optional = true }
 
 # serde
 serde = { workspace = true, features = ["derive"] }
@@ -48,6 +49,7 @@ strum = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true, default-features = false, features = ["clock"] }
 regex = { workspace = true }
+reqwest = { version = "0.12", default-features = false }
 thiserror = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v4"] }
 url = { workspace = true, features = ["serde"] }
@@ -105,11 +107,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
 default = ["rustls"]
-datafusion = [
-    "dep:datafusion",
-    "datafusion-datasource",
-    "datafusion-proto",
-]
+datafusion = ["dep:datafusion", "datafusion-datasource", "datafusion-proto"]
+tracing = ["datafusion", "datafusion-tracing"]
 datafusion-ext = ["datafusion"]
 json = ["parquet/json"]
 python = ["arrow/pyarrow"]

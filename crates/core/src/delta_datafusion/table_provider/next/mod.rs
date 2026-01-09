@@ -30,25 +30,33 @@ use std::any::Any;
 use std::{borrow::Cow, sync::Arc};
 
 use arrow::datatypes::{Schema, SchemaRef};
-use datafusion::common::Result;
+use datafusion::common::{Result, plan_err};
 use datafusion::datasource::TableType;
 use datafusion::logical_expr::TableProviderFilterPushDown;
+use datafusion::logical_expr::dml::InsertOp;
 use datafusion::prelude::Expr;
 use datafusion::{
     catalog::{Session, TableProvider},
     logical_expr::LogicalPlan,
     physical_plan::ExecutionPlan,
 };
+use datafusion_datasource::ListingTableUrl;
+use datafusion_datasource::file_groups::FileGroup;
+use datafusion_datasource::file_sink_config::FileSinkConfig;
+use datafusion_datasource::sink::DataSinkExec;
 use delta_kernel::table_configuration::TableConfiguration;
+use delta_kernel::table_features::TableFeature;
 use serde::{Deserialize, Serialize};
+use tracing::instrument;
 
 pub use self::scan::DeltaScanExec;
 pub(crate) use self::scan::KernelScanPlan;
 use crate::delta_datafusion::DeltaScanConfig;
-use crate::delta_datafusion::engine::DataFusionEngine;
+use crate::delta_datafusion::engine::{AsObjectStoreUrl as _, DataFusionEngine};
 use crate::delta_datafusion::table_provider::TableProviderBuilder;
 use crate::kernel::{EagerSnapshot, Snapshot};
 
+mod data_sink;
 mod scan;
 
 /// Default column name for the file id column we add to files read from disk.
@@ -113,7 +121,7 @@ pub struct DeltaScan {
 
 impl DeltaScan {
     // create new delta scan
-    pub fn new(snapshot: impl Into<SnapshotWrapper>, config: DeltaScanConfig) -> Result<Self> {
+    pub fn try_new(snapshot: impl Into<SnapshotWrapper>, config: DeltaScanConfig) -> Result<Self> {
         let snapshot = snapshot.into();
         let scan_schema = config.table_schema(snapshot.table_configuration())?;
         let full_schema = if config.retain_file_id() {
@@ -143,6 +151,13 @@ impl DeltaScan {
     pub fn builder() -> TableProviderBuilder {
         TableProviderBuilder::new()
     }
+
+    pub fn snapshot(&self) -> &Arc<Snapshot> {
+        match &self.snapshot {
+            SnapshotWrapper::Snapshot(snap) => snap,
+            SnapshotWrapper::EagerSnapshot(esnap) => &esnap.snapshot,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -167,6 +182,7 @@ impl TableProvider for DeltaScan {
         None
     }
 
+    #[instrument(skip_all, level = "info")]
     async fn scan(
         &self,
         session: &dyn Session,
@@ -214,6 +230,51 @@ impl TableProvider for DeltaScan {
         };
 
         scan::execution_plan(&self.config, session, scan_plan, stream, engine, limit).await
+    }
+
+    #[instrument(skip_all, level = "info")]
+    async fn insert_into(
+        &self,
+        _state: &dyn Session,
+        input: Arc<dyn ExecutionPlan>,
+        insert_op: InsertOp,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        if insert_op == InsertOp::Replace {
+            return plan_err!("Insert operation '{insert_op}' is not supported.");
+        }
+
+        let table_root = self.snapshot.snapshot().table_configuration().table_root();
+
+        let parsed_url = ListingTableUrl::parse(table_root)?;
+        let keep_partition_by_columns = self
+            .snapshot
+            .table_configuration()
+            .is_feature_enabled(&TableFeature::MaterializePartitionColumns);
+
+        // TODO: adopt output schema to adhere to table configuration
+        // * handle partition columns (e.g. physical types / dict encoding)
+        // * handle column mapping
+        let output_schema = self.snapshot.snapshot().arrow_schema();
+
+        let config = FileSinkConfig {
+            original_url: table_root.to_string(),
+            object_store_url: table_root.as_object_store_url(),
+            table_paths: vec![parsed_url],
+            output_schema,
+            table_partition_cols: vec![],
+            insert_op,
+            keep_partition_by_columns,
+            file_extension: "parquet".to_string(),
+            file_group: FileGroup::default(),
+        };
+
+        let data_sink = data_sink::DeltaDataSink::new(self.snapshot.clone(), config);
+
+        Ok(Arc::new(DataSinkExec::new(
+            input,
+            Arc::new(data_sink),
+            None,
+        )))
     }
 
     fn supports_filters_pushdown(
