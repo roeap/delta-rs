@@ -309,9 +309,12 @@ pub static INSTANCE: LazyLock<ProtocolChecker> = LazyLock::new(|| {
     // only governs VACUUM protocol-check behavior and is inert for reads/writes.
     // `catalogManaged` is allow-listed so delta-rs can read catalog-managed tables; the
     // catalog-coordinated commit resolution is NOT implemented here and is owned by the
-    // catalog (Unity Catalog RS) side.
+    // catalog (Unity Catalog RS) side. `v2Checkpoint` is part of the UC managed-table
+    // contract; we allow-list it so a managed table opens for read/append even though
+    // delta-rs does not itself write V2 checkpoints in this demo path.
     reader_features.insert(TableFeature::VacuumProtocolCheck);
     reader_features.insert(TableFeature::CatalogManaged);
+    reader_features.insert(TableFeature::V2Checkpoint);
 
     let mut writer_features = HashSet::new();
     writer_features.insert(TableFeature::AppendOnly);
@@ -335,6 +338,7 @@ pub static INSTANCE: LazyLock<ProtocolChecker> = LazyLock::new(|| {
     // write-openable (writers must support all required reader features).
     writer_features.insert(TableFeature::VacuumProtocolCheck);
     writer_features.insert(TableFeature::CatalogManaged);
+    writer_features.insert(TableFeature::V2Checkpoint);
 
     ProtocolChecker::new(reader_features, writer_features)
 });
