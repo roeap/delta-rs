@@ -163,6 +163,35 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Create a new snapshot from an existing snapshot
+    pub fn new(inner: Arc<KernelSnapshot>, config: DeltaTableConfig) -> Snapshot {
+        Self {
+            inner,
+            config,
+            materialized_files: None,
+        }
+    }
+
+    /// Create a new [`Snapshot`] instance
+    pub async fn try_new(
+        log_store: &dyn LogStore,
+        config: DeltaTableConfig,
+        version: Option<Version>,
+    ) -> DeltaResult<Self> {
+        // TODO: bundle operation_id with logstore ...
+        let engine = log_store.engine(None);
+
+        // NB: kernel engine uses Url::join to construct paths,
+        // if the path does not end with a slash, the would override the entire path.
+        // So we need to be extra sure its ends with a slash.
+        let mut table_root = log_store.table_root_url();
+        if !table_root.path().ends_with('/') {
+            table_root.set_path(&format!("{}/", table_root.path()));
+        }
+
+        Self::try_new_with_engine(engine, table_root, config, version).await
+    }
+
     /// Build a snapshot of the table at `table_root` using the provided kernel `engine`.
     ///
     /// When `version` is `None` the latest available version is loaded. This is the engine-aware
@@ -199,26 +228,6 @@ impl Snapshot {
             config,
             materialized_files: None,
         })
-    }
-
-    /// Create a new [`Snapshot`] instance
-    pub async fn try_new(
-        log_store: &dyn LogStore,
-        config: DeltaTableConfig,
-        version: Option<Version>,
-    ) -> DeltaResult<Self> {
-        // TODO: bundle operation_id with logstore ...
-        let engine = log_store.engine(None);
-
-        // NB: kernel engine uses Url::join to construct paths,
-        // if the path does not end with a slash, the would override the entire path.
-        // So we need to be extra sure its ends with a slash.
-        let mut table_root = log_store.table_root_url();
-        if !table_root.path().ends_with('/') {
-            table_root.set_path(&format!("{}/", table_root.path()));
-        }
-
-        Self::try_new_with_engine(engine, table_root, config, version).await
     }
 
     /// Create a [`ScanBuilder`] borrowing this snapshot to configure a read of the table.
