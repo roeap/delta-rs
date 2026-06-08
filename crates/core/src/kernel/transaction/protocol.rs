@@ -305,6 +305,13 @@ pub static INSTANCE: LazyLock<ProtocolChecker> = LazyLock::new(|| {
     {
         reader_features.insert(TableFeature::ColumnMapping);
     }
+    // Allow-listed for the Unity Catalog OSS managed-table demo. `vacuumProtocolCheck`
+    // only governs VACUUM protocol-check behavior and is inert for reads/writes.
+    // `catalogManaged` is allow-listed so delta-rs can read catalog-managed tables; the
+    // catalog-coordinated commit resolution is NOT implemented here and is owned by the
+    // catalog (Unity Catalog RS) side.
+    reader_features.insert(TableFeature::VacuumProtocolCheck);
+    reader_features.insert(TableFeature::CatalogManaged);
 
     let mut writer_features = HashSet::new();
     writer_features.insert(TableFeature::AppendOnly);
@@ -323,6 +330,11 @@ pub static INSTANCE: LazyLock<ProtocolChecker> = LazyLock::new(|| {
     }
     writer_features.insert(TableFeature::DeletionVectors);
     // writer_features.insert(TableFeature::IdentityColumns);
+    // See the reader_features note above: allow-listed for the UC-OSS managed-table demo.
+    // Both are ReaderWriter features, so they must appear here too for the table to be
+    // write-openable (writers must support all required reader features).
+    writer_features.insert(TableFeature::VacuumProtocolCheck);
+    writer_features.insert(TableFeature::CatalogManaged);
 
     ProtocolChecker::new(reader_features, writer_features)
 });
@@ -794,6 +806,26 @@ mod tests {
             assert!(checker.can_read_from(eager).is_ok());
             assert!(checker.can_write_to(eager).is_ok());
         }
+    }
+
+    #[test]
+    fn test_catalog_managed_and_vacuum_protocol_check_are_readable() {
+        // Allow-listed for the Unity Catalog OSS managed-table demo: a protocol requiring
+        // these reader features must pass the global INSTANCE read gate. (Building a
+        // catalog-managed DeltaTableState additionally requires max_catalog_version to be
+        // set at the kernel level — that is orthogonal to the feature-support gate
+        // exercised here.)
+        let protocol = ProtocolInner::new(3, 7)
+            .append_reader_features([
+                TableFeature::CatalogManaged,
+                TableFeature::VacuumProtocolCheck,
+            ])
+            .append_writer_features([
+                TableFeature::CatalogManaged,
+                TableFeature::VacuumProtocolCheck,
+            ])
+            .as_kernel();
+        assert!(INSTANCE.can_read_from_protocol(&protocol).is_ok());
     }
 
     #[tokio::test]
