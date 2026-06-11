@@ -22,6 +22,10 @@ pub struct DataFusionStorageHandler {
     registry: Arc<DashMap<ObjectStoreUrl, Arc<dyn StorageHandler>>>,
     /// The executor to run async tasks on
     handle: Handle,
+    /// Span current at construction, re-entered in each callback so kernel→engine
+    /// storage calls nest under the originating scan/operation rather than
+    /// orphaning into their own trace (see `DataFusionFileFormatHandler`).
+    span: tracing::Span,
 }
 
 impl DataFusionStorageHandler {
@@ -31,6 +35,7 @@ impl DataFusionStorageHandler {
             ctx,
             registry: DashMap::new().into(),
             handle,
+            span: tracing::Span::current(),
         }
     }
 
@@ -68,38 +73,34 @@ impl DataFusionStorageHandler {
 }
 
 impl StorageHandler for DataFusionStorageHandler {
-    #[tracing::instrument(
-        level = "debug",
-        name = "engine::list_from",
-        skip_all,
-        fields(
-            prefix = %path,
-            {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_TOOL,
-            {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_ENGINE
-        )
-    )]
     fn list_from(
         &self,
         path: &Url,
     ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<FileMeta>>>> {
+        let _parent = self.span.enter();
+        let span = tracing::debug_span!(
+            "engine::list_from",
+            prefix = %path,
+            "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_TOOL,
+            "delta.zone" = crate::kernel::mlflow::ZONE_ENGINE,
+        );
+        let _enter = span.enter();
         self.get_or_create(path.as_object_store_url())?
             .list_from(path)
     }
 
-    #[tracing::instrument(
-        level = "debug",
-        name = "engine::read_files",
-        skip_all,
-        fields(
-            num_files = files.len(),
-            {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_TOOL,
-            {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_ENGINE
-        )
-    )]
     fn read_files(
         &self,
         files: Vec<FileSlice>,
     ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<Bytes>>>> {
+        let _parent = self.span.enter();
+        let span = tracing::debug_span!(
+            "engine::read_files",
+            num_files = files.len(),
+            "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_TOOL,
+            "delta.zone" = crate::kernel::mlflow::ZONE_ENGINE,
+        );
+        let _enter = span.enter();
         let grouped_files = group_by_store(files);
         Ok(Box::new(
             grouped_files
@@ -119,19 +120,17 @@ impl StorageHandler for DataFusionStorageHandler {
         Err(delta_kernel::Error::generic("copy_atomic not implemented"))
     }
 
-    #[tracing::instrument(
-        level = "debug",
-        name = "engine::put",
-        skip(self, data),
-        fields(
+    fn put(&self, path: &Url, data: Bytes, overwrite: bool) -> DeltaResult<()> {
+        let _parent = self.span.enter();
+        let span = tracing::debug_span!(
+            "engine::put",
             path = %path,
             size = data.len(),
             overwrite,
-            {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_TOOL,
-            {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_ENGINE
-        )
-    )]
-    fn put(&self, path: &Url, data: Bytes, overwrite: bool) -> DeltaResult<()> {
+            "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_TOOL,
+            "delta.zone" = crate::kernel::mlflow::ZONE_ENGINE,
+        );
+        let _enter = span.enter();
         self.get_or_create(path.as_object_store_url())?
             .put(path, data, overwrite)
     }

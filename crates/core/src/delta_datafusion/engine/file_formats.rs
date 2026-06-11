@@ -28,6 +28,12 @@ pub struct DataFusionFileFormatHandler {
     pq_registry: Arc<DashMap<ObjectStoreUrl, Arc<dyn ParquetHandler>>>,
     json_registry: Arc<DashMap<ObjectStoreUrl, Arc<dyn JsonHandler>>>,
     handle: Handle,
+    /// The span current when this engine was constructed (typically the
+    /// operation / scan span). The kernel drives JSON/parquet reads from its own
+    /// task executor, which carries no `tracing` context, so without re-entering
+    /// this span the callbacks would start a brand-new disconnected root trace.
+    /// See [`Self::read_json_files`].
+    span: tracing::Span,
 }
 
 impl DataFusionFileFormatHandler {
@@ -38,6 +44,7 @@ impl DataFusionFileFormatHandler {
             pq_registry: DashMap::new().into(),
             json_registry: DashMap::new().into(),
             handle,
+            span: tracing::Span::current(),
         }
     }
 
@@ -103,22 +110,22 @@ impl DataFusionFileFormatHandler {
 }
 
 impl ParquetHandler for DataFusionFileFormatHandler {
-    #[tracing::instrument(
-        level = "debug",
-        name = "engine::read_parquet_files",
-        skip_all,
-        fields(
-            num_files = files.len(),
-            {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_TOOL,
-            {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_ENGINE
-        )
-    )]
     fn read_parquet_files(
         &self,
         files: &[FileMeta],
         physical_schema: SchemaRef,
         predicate: Option<PredicateRef>,
     ) -> KernelResult<FileDataReadResultIterator> {
+        // See `read_json_files`: re-enter the originating span so this callback
+        // nests under the scan rather than orphaning into its own trace.
+        let _parent = self.span.enter();
+        let span = tracing::debug_span!(
+            "engine::read_parquet_files",
+            num_files = files.len(),
+            "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_TOOL,
+            "delta.zone" = crate::kernel::mlflow::ZONE_ENGINE,
+        );
+        let _enter = span.enter();
         let grouped_files = group_by_store(files.to_vec());
         Ok(Box::new(
             grouped_files
@@ -147,17 +154,15 @@ impl ParquetHandler for DataFusionFileFormatHandler {
         todo!("write parquet file")
     }
 
-    #[tracing::instrument(
-        level = "trace",
-        name = "engine::read_parquet_footer",
-        skip_all,
-        fields(
-            path = %file.location,
-            {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_TOOL,
-            {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_ENGINE
-        )
-    )]
     fn read_parquet_footer(&self, file: &FileMeta) -> KernelResult<delta_kernel::ParquetFooter> {
+        let _parent = self.span.enter();
+        let span = tracing::trace_span!(
+            "engine::read_parquet_footer",
+            path = %file.location,
+            "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_TOOL,
+            "delta.zone" = crate::kernel::mlflow::ZONE_ENGINE,
+        );
+        let _enter = span.enter();
         self.get_or_create_pq(file.as_object_store_url())?
             .read_parquet_footer(file)
     }
@@ -172,22 +177,23 @@ impl JsonHandler for DataFusionFileFormatHandler {
         arrow_parse_json(json_strings, output_schema)
     }
 
-    #[tracing::instrument(
-        level = "debug",
-        name = "engine::read_json_files",
-        skip_all,
-        fields(
-            num_files = files.len(),
-            {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_TOOL,
-            {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_ENGINE
-        )
-    )]
     fn read_json_files(
         &self,
         files: &[FileMeta],
         physical_schema: SchemaRef,
         predicate: Option<PredicateRef>,
     ) -> KernelResult<FileDataReadResultIterator> {
+        // Re-enter the engine's originating span before opening the callback span
+        // so this kernel→engine callback nests under the scan/operation that
+        // triggered it rather than starting a disconnected root trace.
+        let _parent = self.span.enter();
+        let span = tracing::debug_span!(
+            "engine::read_json_files",
+            num_files = files.len(),
+            "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_TOOL,
+            "delta.zone" = crate::kernel::mlflow::ZONE_ENGINE,
+        );
+        let _enter = span.enter();
         let grouped_files = group_by_store(files.to_vec());
         Ok(Box::new(
             grouped_files
