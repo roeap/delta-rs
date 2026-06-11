@@ -821,12 +821,15 @@ impl<'a> std::future::IntoFuture for PreparedCommit<'a> {
             let mut read_snapshot = read_snapshot;
 
             let commit_span = info_span!(
-                "commit_with_retries",
+                "deltalake::commit",
+                operation = "commit",
                 base_version = read_snapshot.version(),
                 max_retries = this.max_retries,
                 attempt = field::Empty,
                 target_version = field::Empty,
-                conflicts_checked = 0
+                conflicts_checked = 0,
+                "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_TASK,
+                "delta.zone" = crate::kernel::mlflow::ZONE_DELTA_RS,
             );
 
             async move {

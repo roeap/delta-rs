@@ -804,7 +804,7 @@ pub async fn get_latest_version(
 }
 
 /// Read delta log for a specific version
-#[instrument(skip(storage), fields(version = version, path = %commit_uri_from_version(Some(version))))]
+#[instrument(skip(storage), fields(version = version, path = %commit_uri_from_version(Some(version)), {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_TOOL, {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_DELTA_RS))]
 pub async fn read_commit_entry(
     storage: &dyn ObjectStore,
     version: Version,
@@ -828,7 +828,7 @@ pub async fn read_commit_entry(
 }
 
 /// Default implementation for writing a commit entry
-#[instrument(skip(storage), fields(version = version, tmp_path = %tmp_commit, commit_path = %commit_uri_from_version(Some(version))))]
+#[instrument(skip(storage), fields(version = version, tmp_path = %tmp_commit, commit_path = %commit_uri_from_version(Some(version)), {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_TOOL, {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_DELTA_RS))]
 pub async fn write_commit_entry(
     storage: &dyn ObjectStore,
     version: Version,
@@ -856,7 +856,7 @@ pub async fn write_commit_entry(
 }
 
 /// Default implementation for aborting a commit entry
-#[instrument(skip(storage), fields(version = _version, tmp_path = %tmp_commit))]
+#[instrument(skip(storage), fields(version = _version, tmp_path = %tmp_commit, {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_TOOL, {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_DELTA_RS))]
 pub async fn abort_commit_entry(
     storage: &dyn ObjectStore,
     _version: Version,

@@ -810,7 +810,7 @@ impl MergePlan {
 
     /// Perform the operations outlined in the plan.
     #[allow(clippy::too_many_arguments)]
-    #[instrument(skip_all, fields(operation = "optimize", version = snapshot.version()))]
+    #[instrument(level = "info", name = "deltalake::optimize", skip_all, fields(operation = "optimize", version = snapshot.version(), {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_WORKFLOW, {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_DELTA_RS))]
     pub async fn execute(
         mut self,
         log_store: LogStoreRef,
@@ -1005,7 +1005,7 @@ impl MergePlan {
 }
 
 /// Build a Plan on which files to merge together. See [OptimizeBuilder]
-#[instrument(skip_all, fields(operation = "create_merge_plan", version = snapshot.version()))]
+#[instrument(level = "debug", name = "deltalake::create_merge_plan", skip_all, fields(operation = "create_merge_plan", version = snapshot.version(), {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_TASK, {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_DELTA_RS))]
 pub async fn create_merge_plan(
     log_store: &dyn LogStore,
     optimize_type: OptimizeType,

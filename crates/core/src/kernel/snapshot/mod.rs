@@ -44,7 +44,7 @@ use url::Url;
 use super::{Action, CommitInfo, Metadata, Protocol};
 use crate::checkpoints::parse_last_checkpoint_hint;
 use crate::kernel::arrow::engine_ext::{ExpressionEvaluatorExt, rb_from_scan_meta};
-use crate::kernel::{ARROW_HANDLER, StructType, spawn_blocking_with_span};
+use crate::kernel::{ARROW_HANDLER, StructType, spawn_blocking_in_span};
 use crate::logstore::{LogStore, LogStoreExt};
 use crate::{DeltaResult, DeltaTableConfig, DeltaTableError, PartitionFilter, to_kernel_predicate};
 
@@ -117,7 +117,26 @@ impl Snapshot {
         config: DeltaTableConfig,
         version: Option<Version>,
     ) -> DeltaResult<Self> {
-        let snapshot = match spawn_blocking_with_span(move || {
+        let span = tracing::info_span!(
+            "kernel::snapshot_build",
+            table_uri = %table_root,
+            requested_version = version,
+            version = tracing::field::Empty,
+            "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_AGENT,
+            "delta.zone" = crate::kernel::mlflow::ZONE_KERNEL,
+            "mlflow.spanInputs" = tracing::field::Empty,
+            "mlflow.spanOutputs" = tracing::field::Empty,
+        );
+        crate::kernel::mlflow::record_json_in(
+            &span,
+            crate::kernel::mlflow::FIELD_SPAN_INPUTS,
+            &serde_json::json!({
+                "kernel_api": "Snapshot::builder_for",
+                "requested_version": version,
+            }),
+        );
+        let build_span = span.clone();
+        let snapshot = match spawn_blocking_in_span(build_span, move || {
             let mut builder = KernelSnapshot::builder_for(table_root);
             if let Some(version) = version {
                 builder = builder.at_version(version);
@@ -137,6 +156,12 @@ impl Snapshot {
                 }
             }
         };
+        span.record("version", snapshot.version());
+        crate::kernel::mlflow::record_json_in(
+            &span,
+            crate::kernel::mlflow::FIELD_SPAN_OUTPUTS,
+            &serde_json::json!({ "version": snapshot.version() }),
+        );
 
         Ok(Self {
             inner: snapshot,
@@ -181,7 +206,28 @@ impl Snapshot {
 
         let current = self.inner.clone();
         let task_engine = engine.clone();
-        let snapshot = spawn_blocking_with_span(move || {
+        let span = tracing::info_span!(
+            "kernel::snapshot_build",
+            table_uri = %current.table_root(),
+            requested_version = target_version,
+            base_version = current_version,
+            version = tracing::field::Empty,
+            "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_AGENT,
+            "delta.zone" = crate::kernel::mlflow::ZONE_KERNEL,
+            "mlflow.spanInputs" = tracing::field::Empty,
+            "mlflow.spanOutputs" = tracing::field::Empty,
+        );
+        crate::kernel::mlflow::record_json_in(
+            &span,
+            crate::kernel::mlflow::FIELD_SPAN_INPUTS,
+            &serde_json::json!({
+                "kernel_api": "Snapshot::builder_from",
+                "base_version": current_version,
+                "requested_version": target_version,
+            }),
+        );
+        let build_span = span.clone();
+        let snapshot = spawn_blocking_in_span(build_span, move || {
             let mut builder = KernelSnapshot::builder_from(current);
             if let Some(version) = target_version {
                 builder = builder.at_version(version);
@@ -190,6 +236,12 @@ impl Snapshot {
         })
         .await
         .map_err(|e| DeltaTableError::Generic(e.to_string()))??;
+        span.record("version", snapshot.version());
+        crate::kernel::mlflow::record_json_in(
+            &span,
+            crate::kernel::mlflow::FIELD_SPAN_OUTPUTS,
+            &serde_json::json!({ "version": snapshot.version() }),
+        );
 
         let snapshot = Arc::new(Self {
             inner: snapshot,
@@ -790,10 +842,17 @@ impl Snapshot {
         // TODO: bundle operation id with log store ...
         let engine = log_store.engine(None);
         let inner = self.inner.clone();
-        let version =
-            spawn_blocking_with_span(move || inner.get_app_id_version(&app_id, engine.as_ref()))
-                .await
-                .map_err(|e| DeltaTableError::GenericError { source: e.into() })??;
+        let span = tracing::debug_span!(
+            "kernel::get_app_id_version",
+            app_id = %app_id,
+            "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_TASK,
+            "delta.zone" = crate::kernel::mlflow::ZONE_KERNEL,
+        );
+        let version = spawn_blocking_in_span(span, move || {
+            inner.get_app_id_version(&app_id, engine.as_ref())
+        })
+        .await
+        .map_err(|e| DeltaTableError::GenericError { source: e.into() })??;
         if let Some(version) = version {
             return Ok(Some(version));
         }
@@ -813,10 +872,17 @@ impl Snapshot {
         let engine = log_store.engine(None);
         let inner = self.inner.clone();
         let domain = domain.to_string();
-        let metadata =
-            spawn_blocking_with_span(move || inner.get_domain_metadata(&domain, engine.as_ref()))
-                .await
-                .map_err(|e| DeltaTableError::GenericError { source: e.into() })??;
+        let span = tracing::debug_span!(
+            "kernel::get_domain_metadata",
+            domain = %domain,
+            "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_TASK,
+            "delta.zone" = crate::kernel::mlflow::ZONE_KERNEL,
+        );
+        let metadata = spawn_blocking_in_span(span, move || {
+            inner.get_domain_metadata(&domain, engine.as_ref())
+        })
+        .await
+        .map_err(|e| DeltaTableError::GenericError { source: e.into() })??;
         Ok(metadata)
     }
 }
@@ -929,7 +995,13 @@ async fn read_last_checkpoint_version(
     engine: Arc<dyn Engine>,
     log_root: Url,
 ) -> DeltaResult<Option<Version>> {
-    spawn_blocking_with_span(move || {
+    let span = tracing::debug_span!(
+        "kernel::read_last_checkpoint",
+        log_root = %log_root,
+        "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_TASK,
+        "delta.zone" = crate::kernel::mlflow::ZONE_KERNEL,
+    );
+    spawn_blocking_in_span(span, move || {
         let storage = engine.storage_handler();
         let checkpoint_path = log_root
             .join("_last_checkpoint")
@@ -2417,6 +2489,158 @@ mod tests {
             eager_paths, plain_paths,
             "short-circuit cache replay must yield the same files in the same \
              order as a fresh kernel replay with predicate = None",
+        );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod instrumentation_tests {
+    use std::sync::{Arc, Mutex};
+
+    use delta_kernel::schema::{DataType, PrimitiveType, StructField};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::registry::LookupSpan;
+    use tracing_subscriber::{Layer, Registry};
+
+    use super::Snapshot;
+    use crate::{DeltaResult, DeltaTable};
+
+    #[derive(Clone, Debug)]
+    struct SpanRecord {
+        name: &'static str,
+        parent: Option<&'static str>,
+        /// Value of the `mlflow.spanType` field, if the span declared one.
+        span_type: Option<String>,
+        /// Value of the `delta.zone` field, if the span declared one.
+        zone: Option<String>,
+    }
+
+    /// Collects the string values of the MLflow chip fields off a span's
+    /// attributes so tests can assert the OTel annotations are present.
+    #[derive(Default)]
+    struct MlflowFieldVisitor {
+        span_type: Option<String>,
+        zone: Option<String>,
+    }
+
+    impl tracing::field::Visit for MlflowFieldVisitor {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            match field.name() {
+                "mlflow.spanType" => self.span_type = Some(value.to_string()),
+                "delta.zone" => self.zone = Some(value.to_string()),
+                _ => {}
+            }
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            // Static `&str` fields are reported through `record_str`; this catches
+            // any that arrive via the debug path so the test stays robust.
+            let rendered = format!("{value:?}");
+            let unquoted = rendered.trim_matches('"').to_string();
+            match field.name() {
+                "mlflow.spanType" => self.span_type = Some(unquoted),
+                "delta.zone" => self.zone = Some(unquoted),
+                _ => {}
+            }
+        }
+    }
+
+    /// Minimal tracing layer that records each span's name, its parent's name,
+    /// and the MLflow chip fields, so tests can assert the trace tree is
+    /// connected and carries the rendering annotations.
+    #[derive(Clone, Default)]
+    struct CollectingLayer {
+        spans: Arc<Mutex<Vec<SpanRecord>>>,
+    }
+
+    impl<S> Layer<S> for CollectingLayer
+    where
+        S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            id: &tracing::span::Id,
+            ctx: Context<'_, S>,
+        ) {
+            // Prefer the explicit parent, otherwise the contextual (current) parent.
+            let parent_name = ctx
+                .span(id)
+                .and_then(|span| span.parent().map(|p| p.name()))
+                .or_else(|| {
+                    attrs
+                        .parent()
+                        .and_then(|pid| ctx.span(pid).map(|p| p.name()))
+                });
+            let mut visitor = MlflowFieldVisitor::default();
+            attrs.record(&mut visitor);
+            self.spans.lock().unwrap().push(SpanRecord {
+                name: attrs.metadata().name(),
+                parent: parent_name,
+                span_type: visitor.span_type,
+                zone: visitor.zone,
+            });
+        }
+    }
+
+    /// The crux of the kernel-handover instrumentation: work that we hand to a
+    /// blocking thread to drive Delta Kernel must appear as a child of the
+    /// originating span, not as a disconnected root.
+    #[tokio::test(flavor = "current_thread")]
+    async fn kernel_snapshot_build_span_is_child_of_caller() -> DeltaResult<()> {
+        let layer = CollectingLayer::default();
+        let subscriber = Registry::default().with(layer.clone());
+
+        // Build a table outside the recorded scope so we only capture the load.
+        let table = DeltaTable::new_in_memory()
+            .create()
+            .with_columns([StructField::new(
+                "id",
+                DataType::Primitive(PrimitiveType::Integer),
+                true,
+            )])
+            .await?;
+        let log_store = table.log_store();
+
+        // Install the collecting subscriber for this (current-thread) runtime.
+        // `spawn_blocking_in_span` propagates the dispatcher onto the blocking
+        // thread, so the kernel span is recorded by the same subscriber.
+        let _guard = tracing::dispatcher::set_default(&subscriber.into());
+        {
+            let parent = tracing::info_span!("test_parent");
+            let _enter = parent.enter();
+            // `Snapshot::try_new` drives kernel snapshot construction on a
+            // blocking thread via `spawn_blocking_in_span`.
+            Snapshot::try_new(log_store.as_ref(), Default::default(), None).await?;
+        }
+
+        let spans = layer.spans.lock().unwrap();
+        let build = spans
+            .iter()
+            .find(|s| s.name == "kernel::snapshot_build")
+            .expect("a kernel::snapshot_build span should have been created");
+
+        assert_eq!(
+            build.parent,
+            Some("test_parent"),
+            "kernel work must nest under the caller's span across the spawn_blocking boundary, \
+             but the span tree was disconnected (parent = {:?})",
+            build.parent,
+        );
+
+        // The kernel handoff span must carry the MLflow chip fields so the trace
+        // renders as a categorized, zone-tagged span in the MLflow UI.
+        assert_eq!(
+            build.span_type.as_deref(),
+            Some(crate::kernel::mlflow::SPAN_TYPE_AGENT),
+            "kernel::snapshot_build should advertise mlflow.spanType",
+        );
+        assert_eq!(
+            build.zone.as_deref(),
+            Some(crate::kernel::mlflow::ZONE_KERNEL),
+            "kernel::snapshot_build should be tagged with delta.zone=kernel",
         );
 
         Ok(())

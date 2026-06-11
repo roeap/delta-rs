@@ -265,11 +265,15 @@ impl ExtensionPlanner for UpdateMetricExtensionPlanner {
 
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(
+    level = "info",
+    name = "deltalake::update",
     skip_all,
     fields(
         operation = "update",
         version = snapshot.version(),
         table_uri = %log_store.root_url(),
+        {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_WORKFLOW,
+        {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_DELTA_RS,
     )
 )]
 async fn execute(

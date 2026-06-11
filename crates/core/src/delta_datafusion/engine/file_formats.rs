@@ -103,6 +103,16 @@ impl DataFusionFileFormatHandler {
 }
 
 impl ParquetHandler for DataFusionFileFormatHandler {
+    #[tracing::instrument(
+        level = "debug",
+        name = "engine::read_parquet_files",
+        skip_all,
+        fields(
+            num_files = files.len(),
+            {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_TOOL,
+            {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_ENGINE
+        )
+    )]
     fn read_parquet_files(
         &self,
         files: &[FileMeta],
@@ -137,6 +147,16 @@ impl ParquetHandler for DataFusionFileFormatHandler {
         todo!("write parquet file")
     }
 
+    #[tracing::instrument(
+        level = "trace",
+        name = "engine::read_parquet_footer",
+        skip_all,
+        fields(
+            path = %file.location,
+            {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_TOOL,
+            {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_ENGINE
+        )
+    )]
     fn read_parquet_footer(&self, file: &FileMeta) -> KernelResult<delta_kernel::ParquetFooter> {
         self.get_or_create_pq(file.as_object_store_url())?
             .read_parquet_footer(file)
@@ -152,6 +172,16 @@ impl JsonHandler for DataFusionFileFormatHandler {
         arrow_parse_json(json_strings, output_schema)
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "engine::read_json_files",
+        skip_all,
+        fields(
+            num_files = files.len(),
+            {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_TOOL,
+            {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_ENGINE
+        )
+    )]
     fn read_json_files(
         &self,
         files: &[FileMeta],

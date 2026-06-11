@@ -60,7 +60,9 @@ impl PartitionAddActionsProvider for EagerSnapshot {
         version = snapshot.version(),
         has_predicate = predicate.is_some(),
         partition_scan = field::Empty,
-        candidate_count = field::Empty
+        candidate_count = field::Empty,
+        {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_RETRIEVER,
+        {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_DELTA_RS
     )
 )]
 pub(crate) async fn find_files(
@@ -418,7 +420,9 @@ fn join_batches_with_add_actions(
     fields(
         version = snapshot.version(),
         total_files = field::Empty,
-        matching_files = field::Empty
+        matching_files = field::Empty,
+        {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_RETRIEVER,
+        {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_DELTA_RS
     )
 )]
 pub(in crate::delta_datafusion) async fn find_files_scan(

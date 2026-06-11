@@ -13,7 +13,7 @@ use crate::protocol::to_rb;
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
 use arrow_json::LineDelimitedWriter;
 
-#[tracing::instrument(skip(log_store, snapshot), fields(operation = "log_compaction", start_version = start_version, end_version = end_version, table_uri = %log_store.root_url()))]
+#[tracing::instrument(level = "info", name = "deltalake::log_compaction", skip(log_store, snapshot), fields(operation = "log_compaction", start_version = start_version, end_version = end_version, table_uri = %log_store.root_url(), {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_WORKFLOW, {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_DELTA_RS))]
 pub(crate) async fn compact_logs_for(
     start_version: u64,
     end_version: u64,

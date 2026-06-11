@@ -124,6 +124,17 @@ impl ScanBuilder {
     }
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "kernel::scan_build",
+    skip_all,
+    fields(
+        version = snapshot.version(),
+        has_predicate = predicate.is_some(),
+        {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_TASK,
+        {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_KERNEL
+    )
+)]
 fn build_kernel_scan(
     snapshot: Arc<KernelSnapshot>,
     schema: Option<SchemaRef>,
@@ -399,15 +410,35 @@ impl Scan {
 
         let inner = self.inner.clone();
         let blocking_iter = move || {
+            let mut items: u64 = 0;
             for res in inner.scan_metadata(engine.as_ref())? {
+                items += 1;
                 if tx.blocking_send(Ok(res?)).is_err() {
                     break;
                 }
             }
+            tracing::Span::current().record("items", items);
+            crate::kernel::mlflow::record_json(
+                crate::kernel::mlflow::FIELD_SPAN_OUTPUTS,
+                &serde_json::json!({ "files": items, "seeded": false }),
+            );
             Ok(())
         };
 
-        builder.spawn_blocking(blocking_iter);
+        let span = tracing::info_span!(
+            "kernel::scan_metadata",
+            items = tracing::field::Empty,
+            "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_RETRIEVER,
+            "delta.zone" = crate::kernel::mlflow::ZONE_KERNEL,
+            "mlflow.spanInputs" = tracing::field::Empty,
+            "mlflow.spanOutputs" = tracing::field::Empty,
+        );
+        crate::kernel::mlflow::record_json_in(
+            &span,
+            crate::kernel::mlflow::FIELD_SPAN_INPUTS,
+            &serde_json::json!({ "kernel_api": "Scan::scan_metadata", "seeded": false }),
+        );
+        builder.spawn_blocking_in_span(span, blocking_iter);
         builder.build()
     }
 
@@ -465,20 +496,45 @@ impl Scan {
         let mut builder = ReceiverStreamBuilder::<ScanMetadata>::new(100);
         let tx = builder.tx();
         let scan_inner = move || {
+            let mut items: u64 = 0;
             for res in inner.scan_metadata_from(
                 engine.as_ref(),
                 existing_version,
                 Box::new(scan_row_iter),
                 existing_predicate,
             )? {
+                items += 1;
                 if tx.blocking_send(Ok(res?)).is_err() {
                     break;
                 }
             }
+            tracing::Span::current().record("items", items);
+            crate::kernel::mlflow::record_json(
+                crate::kernel::mlflow::FIELD_SPAN_OUTPUTS,
+                &serde_json::json!({ "files": items, "seeded": true }),
+            );
             Ok(())
         };
 
-        builder.spawn_blocking(scan_inner);
+        let span = tracing::info_span!(
+            "kernel::scan_metadata",
+            seeded = true,
+            items = tracing::field::Empty,
+            "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_RETRIEVER,
+            "delta.zone" = crate::kernel::mlflow::ZONE_KERNEL,
+            "mlflow.spanInputs" = tracing::field::Empty,
+            "mlflow.spanOutputs" = tracing::field::Empty,
+        );
+        crate::kernel::mlflow::record_json_in(
+            &span,
+            crate::kernel::mlflow::FIELD_SPAN_INPUTS,
+            &serde_json::json!({
+                "kernel_api": "Scan::scan_metadata_from",
+                "seeded": true,
+                "from_version": existing_version,
+            }),
+        );
+        builder.spawn_blocking_in_span(span, scan_inner);
         builder.build()
     }
 }

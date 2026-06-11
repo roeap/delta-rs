@@ -154,12 +154,18 @@ where
                         let table_root = this.table_root.clone();
                         let tx = this.dv_stream.tx();
 
+                        let span = tracing::debug_span!(
+                            "kernel::dv_load",
+                            path = %file.file_url,
+                            "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_TASK,
+                            "delta.zone" = crate::kernel::mlflow::ZONE_KERNEL,
+                        );
                         let load_dv = move || {
                             let dv = dv_info.get_selection_vector(engine.as_ref(), &table_root)?;
                             let _ = tx.blocking_send(Ok((file_url, dv, num_records)));
                             Ok(())
                         };
-                        this.dv_stream.spawn_blocking(load_dv);
+                        this.dv_stream.spawn_blocking_in_span(span, load_dv);
                     }
                 }
 

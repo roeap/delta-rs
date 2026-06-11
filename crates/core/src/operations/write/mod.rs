@@ -633,10 +633,12 @@ impl std::future::IntoFuture for WriteBuilder {
                 Ok(DeltaTable::new_with_state(this.log_store, commit.snapshot))
             }
             .instrument(tracing::info_span!(
-                "write_operation",
+                "deltalake::write",
                 operation = "write",
                 mode = ?mode,
-                table_uri = %table_uri
+                table_uri = %table_uri,
+                "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_WORKFLOW,
+                "delta.zone" = crate::kernel::mlflow::ZONE_DELTA_RS,
             )),
         )
     }
