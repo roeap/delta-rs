@@ -415,47 +415,62 @@ impl std::future::IntoFuture for VacuumBuilder {
 
     fn into_future(self) -> Self::IntoFuture {
         let this = self;
-        Box::pin(async move {
-            let snapshot =
-                resolve_snapshot(&this.log_store, this.snapshot.clone(), true, None).await?;
-            let plan = this.create_vacuum_plan(&snapshot).await?;
+        let span = info_span!(
+            "deltalake::vacuum",
+            operation = "vacuum",
+            table_uri = %this.log_store.root_url(),
+            dry_run = this.dry_run,
+            "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_WORKFLOW,
+            "delta.zone" = crate::kernel::mlflow::ZONE_DELTA_RS,
+        );
+        Box::pin(
+            async move {
+                let snapshot =
+                    resolve_snapshot(&this.log_store, this.snapshot.clone(), true, None).await?;
+                let plan = this.create_vacuum_plan(&snapshot).await?;
 
-            if this.dry_run {
-                return Ok((
-                    DeltaTable::new_with_state(this.log_store, DeltaTableState::new(snapshot)),
-                    VacuumMetrics {
-                        files_deleted: plan.files_to_delete.iter().map(|f| f.to_string()).collect(),
-                        dry_run: true,
-                    },
-                ));
+                if this.dry_run {
+                    return Ok((
+                        DeltaTable::new_with_state(this.log_store, DeltaTableState::new(snapshot)),
+                        VacuumMetrics {
+                            files_deleted: plan
+                                .files_to_delete
+                                .iter()
+                                .map(|f| f.to_string())
+                                .collect(),
+                            dry_run: true,
+                        },
+                    ));
+                }
+
+                let operation_id = this.get_operation_id();
+                this.pre_execute(operation_id).await?;
+
+                let result = plan
+                    .execute(
+                        this.log_store.clone(),
+                        &snapshot,
+                        this.commit_properties.clone(),
+                        operation_id,
+                        this.get_custom_execute_handler(),
+                    )
+                    .await?;
+
+                this.post_execute(operation_id).await?;
+
+                Ok(match result {
+                    Some((snapshot, metrics)) => (
+                        DeltaTable::new_with_state(this.log_store, snapshot),
+                        metrics,
+                    ),
+                    None => (
+                        DeltaTable::new_with_state(this.log_store, DeltaTableState::new(snapshot)),
+                        Default::default(),
+                    ),
+                })
             }
-
-            let operation_id = this.get_operation_id();
-            this.pre_execute(operation_id).await?;
-
-            let result = plan
-                .execute(
-                    this.log_store.clone(),
-                    &snapshot,
-                    this.commit_properties.clone(),
-                    operation_id,
-                    this.get_custom_execute_handler(),
-                )
-                .await?;
-
-            this.post_execute(operation_id).await?;
-
-            Ok(match result {
-                Some((snapshot, metrics)) => (
-                    DeltaTable::new_with_state(this.log_store, snapshot),
-                    metrics,
-                ),
-                None => (
-                    DeltaTable::new_with_state(this.log_store, DeltaTableState::new(snapshot)),
-                    Default::default(),
-                ),
-            })
-        })
+            .instrument(span),
+        )
     }
 }
 

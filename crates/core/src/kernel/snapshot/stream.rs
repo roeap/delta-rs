@@ -94,21 +94,37 @@ impl<O: Send + 'static> ReceiverStreamBuilder<O> {
     ///
     /// This is often used to spawn tasks that write to the sender
     /// retrieved from `Self::tx`.
+    ///
+    /// The blocking work re-enters the *current* span. Prefer
+    /// [`Self::spawn_blocking_in_span`] with an explicit span when the work
+    /// (e.g. driving a Delta Kernel log-replay iterator) should get its own
+    /// node in the trace tree.
     pub fn spawn_blocking<F>(&mut self, f: F)
     where
         F: FnOnce() -> DeltaResult<()>,
         F: Send + 'static,
     {
-        // Capture the current dispatcher and span
-        let dispatch = dispatcher::get_default(|d| d.clone());
-        let span = Span::current();
+        self.spawn_blocking_in_span(Span::current(), f);
+    }
 
-        self.join_set.spawn_blocking(move || {
-            dispatcher::with_default(&dispatch, || {
-                let _enter = span.enter();
-                f()
-            })
-        });
+    /// Spawn a blocking task as in [`Self::spawn_blocking`], but enter
+    /// `span` for the entire duration of `f` (across every `blocking_send`
+    /// iteration) so the streamed work nests under its own span.
+    ///
+    /// `span` should be built on the calling thread so it captures its parent;
+    /// it is then moved into the blocking task and entered there. The dispatcher
+    /// is propagated so the task reports to the caller's subscriber.
+    pub fn spawn_blocking_in_span<F>(&mut self, span: Span, f: F)
+    where
+        F: FnOnce() -> DeltaResult<()>,
+        F: Send + 'static,
+    {
+        // Capture the current dispatcher so the spawned thread reports to the
+        // same subscriber as the caller.
+        let dispatch = dispatcher::get_default(|d| d.clone());
+
+        self.join_set
+            .spawn_blocking(move || dispatcher::with_default(&dispatch, || span.in_scope(f)));
     }
 
     /// Create a stream of all data written to `tx`

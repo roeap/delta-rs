@@ -824,7 +824,7 @@ const DUPLICATE_MATCH_MARKER_COLUMNS: &[&str] = &[
 ];
 
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(skip_all, fields(operation = "merge", version = snapshot.version(), table_uri = %log_store.root_url()))]
+#[tracing::instrument(level = "info", name = "deltalake::merge", skip_all, fields(operation = "merge", version = snapshot.version(), table_uri = %log_store.root_url(), {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_WORKFLOW, {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_DELTA_RS, {crate::kernel::mlflow::FIELD_SPAN_OUTPUTS} = tracing::field::Empty))]
 async fn execute(
     predicate: Expression,
     mut source: DataFrame,
@@ -1699,6 +1699,8 @@ async fn execute(
         not_matched_predicates: not_match_target_operations,
         not_matched_by_source_predicates: not_match_source_operations,
     };
+
+    crate::kernel::mlflow::record_json(crate::kernel::mlflow::FIELD_SPAN_OUTPUTS, &metrics);
 
     if actions.is_empty() {
         return Ok((snapshot, metrics));

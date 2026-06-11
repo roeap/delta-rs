@@ -4,6 +4,7 @@ use datafusion::catalog::Session;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
 use futures::future::BoxFuture;
+use tracing::Instrument as _;
 
 use super::CustomExecuteHandler;
 use crate::DeltaTable;
@@ -75,52 +76,65 @@ impl std::future::IntoFuture for LoadBuilder {
 
     fn into_future(self) -> Self::IntoFuture {
         let this = self;
+        let span = tracing::info_span!(
+            "deltalake::load",
+            operation = "load",
+            table_uri = %this.log_store.root_url(),
+            "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_WORKFLOW,
+            "delta.zone" = crate::kernel::mlflow::ZONE_DELTA_RS,
+        );
 
-        Box::pin(async move {
-            let snapshot = resolve_snapshot(&this.log_store, this.snapshot, true, None).await?;
-            PROTOCOL.can_read_from(&snapshot)?;
+        Box::pin(
+            async move {
+                let snapshot = resolve_snapshot(&this.log_store, this.snapshot, true, None).await?;
+                PROTOCOL.can_read_from(&snapshot)?;
 
-            let schema = snapshot.read_schema();
-            let projection = this
-                .columns
-                .map(|cols| {
-                    cols.iter()
-                        .map(|col| {
-                            schema.column_with_name(col).map(|(idx, _)| idx).ok_or(
-                                DeltaTableError::SchemaMismatch {
-                                    msg: format!("Column '{col}' does not exist in table schema."),
-                                },
-                            )
-                        })
-                        .collect::<Result<_, _>>()
-                })
-                .transpose()?;
+                let schema = snapshot.read_schema();
+                let projection = this
+                    .columns
+                    .map(|cols| {
+                        cols.iter()
+                            .map(|col| {
+                                schema.column_with_name(col).map(|(idx, _)| idx).ok_or(
+                                    DeltaTableError::SchemaMismatch {
+                                        msg: format!(
+                                            "Column '{col}' does not exist in table schema."
+                                        ),
+                                    },
+                                )
+                            })
+                            .collect::<Result<_, _>>()
+                    })
+                    .transpose()?;
 
-            let session = if let Some(session) = this.session {
-                session
-            } else {
-                let session = Arc::new(create_session().into_inner().state());
-                let url = this.log_store.log_root_url();
-                let store_url = url.as_object_store_url();
-                if session.runtime_env().object_store(&store_url).is_err() {
+                let session = if let Some(session) = this.session {
                     session
-                        .runtime_env()
-                        .register_object_store(&url, this.log_store.root_object_store(None));
-                }
-                session
-            };
+                } else {
+                    let session = Arc::new(create_session().into_inner().state());
+                    let url = this.log_store.log_root_url();
+                    let store_url = url.as_object_store_url();
+                    if session.runtime_env().object_store(&store_url).is_err() {
+                        session
+                            .runtime_env()
+                            .register_object_store(&url, this.log_store.root_object_store(None));
+                    }
+                    session
+                };
 
-            let table = DeltaTable::new_with_state(this.log_store, DeltaTableState::new(snapshot));
-            let provider = table.table_provider().await?;
-            let scan_plan = provider
-                .scan(session.as_ref(), projection.as_ref(), &[], None)
-                .await?;
+                let table =
+                    DeltaTable::new_with_state(this.log_store, DeltaTableState::new(snapshot));
+                let provider = table.table_provider().await?;
+                let scan_plan = provider
+                    .scan(session.as_ref(), projection.as_ref(), &[], None)
+                    .await?;
 
-            let plan = CoalescePartitionsExec::new(scan_plan);
-            let stream = plan.execute(0, session.task_ctx())?;
+                let plan = CoalescePartitionsExec::new(scan_plan);
+                let stream = plan.execute(0, session.task_ctx())?;
 
-            Ok((table, stream))
-        })
+                Ok((table, stream))
+            }
+            .instrument(span),
+        )
     }
 }
 

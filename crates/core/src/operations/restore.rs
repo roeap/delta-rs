@@ -32,6 +32,7 @@ use futures::future::BoxFuture;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt as _};
 use serde::Serialize;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use super::{CustomExecuteHandler, Operation};
@@ -349,37 +350,48 @@ impl std::future::IntoFuture for RestoreBuilder {
 
     fn into_future(self) -> Self::IntoFuture {
         let mut this = self;
+        let span = tracing::info_span!(
+            "deltalake::restore",
+            operation = "restore",
+            table_uri = %this.log_store.root_url(),
+            version_to_restore = this.version_to_restore,
+            "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_WORKFLOW,
+            "delta.zone" = crate::kernel::mlflow::ZONE_DELTA_RS,
+        );
 
-        Box::pin(async move {
-            let snapshot =
-                resolve_snapshot(&this.log_store, this.snapshot.clone(), true, None).await?;
+        Box::pin(
+            async move {
+                let snapshot =
+                    resolve_snapshot(&this.log_store, this.snapshot.clone(), true, None).await?;
 
-            let operation_id = this.get_operation_id();
-            this.pre_execute(operation_id).await?;
+                let operation_id = this.get_operation_id();
+                this.pre_execute(operation_id).await?;
 
-            let handle = this.custom_execute_handler.take();
-            let (metrics, new_state) = execute(
-                this.log_store.clone(),
-                snapshot,
-                this.version_to_restore,
-                this.datetime_to_restore,
-                this.ignore_missing_files,
-                this.protocol_downgrade_allowed,
-                this.commit_properties.clone(),
-                handle.clone(),
-                operation_id,
-            )
-            .await?;
+                let handle = this.custom_execute_handler.take();
+                let (metrics, new_state) = execute(
+                    this.log_store.clone(),
+                    snapshot,
+                    this.version_to_restore,
+                    this.datetime_to_restore,
+                    this.ignore_missing_files,
+                    this.protocol_downgrade_allowed,
+                    this.commit_properties.clone(),
+                    handle.clone(),
+                    operation_id,
+                )
+                .await?;
 
-            if let Some(handler) = handle {
-                handler.post_execute(&this.log_store, operation_id).await?;
+                if let Some(handler) = handle {
+                    handler.post_execute(&this.log_store, operation_id).await?;
+                }
+
+                Ok((
+                    DeltaTable::new_with_state(this.log_store, new_state),
+                    metrics,
+                ))
             }
-
-            Ok((
-                DeltaTable::new_with_state(this.log_store, new_state),
-                metrics,
-            ))
-        })
+            .instrument(span),
+        )
     }
 }
 

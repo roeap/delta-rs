@@ -31,7 +31,7 @@ pub trait ObjectStoreRetryExt: ObjectStore {
     /// bytes to location, or fail. No clients should be able to observe a partially written object
     ///
     /// Note that `put_with_opts` may have precondition semantics, and thus may not be retriable.
-    #[instrument(skip(self, bytes), fields(path = %location, size = bytes.content_length()))]
+    #[instrument(skip(self, bytes), fields(path = %location, size = bytes.content_length(), {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_TOOL, {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_DELTA_RS))]
     async fn put_with_retries(
         &self,
         location: &Path,

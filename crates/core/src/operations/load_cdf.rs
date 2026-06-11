@@ -447,6 +447,12 @@ impl CdfLoadBuilder {
     }
 
     /// Executes the scan
+    #[tracing::instrument(
+        level = "info",
+        name = "deltalake::load_cdf",
+        skip_all,
+        fields(operation = "load_cdf", table_uri = %self.log_store.root_url(), {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_WORKFLOW, {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_DELTA_RS)
+    )]
     pub async fn build(
         &self,
         session: &dyn Session,

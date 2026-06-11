@@ -68,6 +68,16 @@ impl DataFusionStorageHandler {
 }
 
 impl StorageHandler for DataFusionStorageHandler {
+    #[tracing::instrument(
+        level = "debug",
+        name = "engine::list_from",
+        skip_all,
+        fields(
+            prefix = %path,
+            {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_TOOL,
+            {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_ENGINE
+        )
+    )]
     fn list_from(
         &self,
         path: &Url,
@@ -76,6 +86,16 @@ impl StorageHandler for DataFusionStorageHandler {
             .list_from(path)
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "engine::read_files",
+        skip_all,
+        fields(
+            num_files = files.len(),
+            {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_TOOL,
+            {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_ENGINE
+        )
+    )]
     fn read_files(
         &self,
         files: Vec<FileSlice>,
@@ -99,6 +119,18 @@ impl StorageHandler for DataFusionStorageHandler {
         Err(delta_kernel::Error::generic("copy_atomic not implemented"))
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "engine::put",
+        skip(self, data),
+        fields(
+            path = %path,
+            size = data.len(),
+            overwrite,
+            {crate::kernel::mlflow::FIELD_SPAN_TYPE} = crate::kernel::mlflow::SPAN_TYPE_TOOL,
+            {crate::kernel::mlflow::FIELD_ZONE} = crate::kernel::mlflow::ZONE_ENGINE
+        )
+    )]
     fn put(&self, path: &Url, data: Bytes, overwrite: bool) -> DeltaResult<()> {
         self.get_or_create(path.as_object_store_url())?
             .put(path, data, overwrite)

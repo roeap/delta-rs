@@ -8,6 +8,7 @@ use delta_kernel::schema::{ColumnMetadataKey, MetadataValue};
 use futures::TryStreamExt as _;
 use futures::future::BoxFuture;
 use serde_json::Value;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use super::{CustomExecuteHandler, Operation};
@@ -388,57 +389,73 @@ impl std::future::IntoFuture for CreateBuilder {
 
     fn into_future(self) -> Self::IntoFuture {
         let this = self;
-        Box::pin(async move {
-            let handler = this.custom_execute_handler.clone();
-            let mode = &this.mode;
-            let (mut table, mut actions, operation, operation_id) =
-                this.clone().into_table_and_actions().await?;
+        let span = tracing::info_span!(
+            "deltalake::create",
+            operation = "create",
+            mode = ?this.mode,
+            num_columns = this.columns.len(),
+            location = this.location.as_deref().unwrap_or_default(),
+            version = tracing::field::Empty,
+            "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_WORKFLOW,
+            "delta.zone" = crate::kernel::mlflow::ZONE_DELTA_RS,
+        );
+        Box::pin(
+            async move {
+                let handler = this.custom_execute_handler.clone();
+                let mode = &this.mode;
+                let (mut table, mut actions, operation, operation_id) =
+                    this.clone().into_table_and_actions().await?;
 
-            let table_state = if table.log_store.is_delta_table_location().await? {
-                match mode {
-                    SaveMode::ErrorIfExists => return Err(CreateError::TableAlreadyExists.into()),
-                    SaveMode::Append => return Err(CreateError::AppendNotAllowed.into()),
-                    SaveMode::Ignore => {
-                        table.load().await?;
-                        return Ok(table);
+                let table_state = if table.log_store.is_delta_table_location().await? {
+                    match mode {
+                        SaveMode::ErrorIfExists => {
+                            return Err(CreateError::TableAlreadyExists.into());
+                        }
+                        SaveMode::Append => return Err(CreateError::AppendNotAllowed.into()),
+                        SaveMode::Ignore => {
+                            table.load().await?;
+                            return Ok(table);
+                        }
+                        SaveMode::Overwrite => {
+                            table.load().await?;
+                            let remove_actions = table
+                                .snapshot()?
+                                .snapshot()
+                                .file_views(&table.log_store(), None)
+                                .map_ok(|p| p.remove_action(true).into())
+                                .try_collect::<Vec<_>>()
+                                .await?;
+                            actions.extend(remove_actions);
+                            Some(table.snapshot()?)
+                        }
                     }
-                    SaveMode::Overwrite => {
-                        table.load().await?;
-                        let remove_actions = table
-                            .snapshot()?
-                            .snapshot()
-                            .file_views(&table.log_store(), None)
-                            .map_ok(|p| p.remove_action(true).into())
-                            .try_collect::<Vec<_>>()
-                            .await?;
-                        actions.extend(remove_actions);
-                        Some(table.snapshot()?)
-                    }
+                } else {
+                    None
+                };
+
+                let version = CommitBuilder::from(this.commit_properties.clone())
+                    .with_actions(actions)
+                    .with_operation_id(operation_id)
+                    .with_post_commit_hook_handler(handler.clone())
+                    .build(
+                        table_state.map(|f| f as &dyn TableReference),
+                        table.log_store.clone(),
+                        operation,
+                    )
+                    .await?
+                    .version();
+                tracing::Span::current().record("version", version);
+                table.load_version(version).await?;
+
+                if let Some(handler) = handler {
+                    handler
+                        .post_execute(&table.log_store(), operation_id)
+                        .await?;
                 }
-            } else {
-                None
-            };
-
-            let version = CommitBuilder::from(this.commit_properties.clone())
-                .with_actions(actions)
-                .with_operation_id(operation_id)
-                .with_post_commit_hook_handler(handler.clone())
-                .build(
-                    table_state.map(|f| f as &dyn TableReference),
-                    table.log_store.clone(),
-                    operation,
-                )
-                .await?
-                .version();
-            table.load_version(version).await?;
-
-            if let Some(handler) = handler {
-                handler
-                    .post_execute(&table.log_store(), operation_id)
-                    .await?;
+                Ok(table)
             }
-            Ok(table)
-        })
+            .instrument(span),
+        )
     }
 }
 

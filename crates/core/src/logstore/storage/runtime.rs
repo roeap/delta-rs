@@ -17,6 +17,7 @@ use object_store::{
 use object_store::{MultipartUpload, PutMultipartOptions};
 use serde::{Deserialize, Serialize};
 use tokio::runtime::{Builder as RuntimeBuilder, Handle, Runtime};
+use tracing::Instrument as _;
 
 /// Creates static IO Runtime with optional configuration
 fn io_rt(config: Option<&RuntimeConfig>) -> &Runtime {
@@ -137,10 +138,21 @@ impl<T: ObjectStore + Clone> DeltaIOStorageBackend<T> {
         O: Send + 'static,
     {
         let store = store.clone();
+        // Propagate the caller's tracing context across the runtime boundary.
+        // The span is built in the caller's dispatcher context, so it captures
+        // the active subscriber; `.instrument` re-enters it on every poll on the
+        // IO runtime, nesting the work under the originating span rather than
+        // leaving it as a disconnected root.
+        let span = tracing::debug_span!(
+            "io_rt::object_store_op",
+            path = %path,
+            "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_TOOL,
+            "delta.zone" = crate::kernel::mlflow::ZONE_DELTA_RS,
+        );
         let fut = self
             .rt
             .get_handle()
-            .spawn(async move { f(&store, &path).await });
+            .spawn(async move { f(&store, &path).await }.instrument(span));
         fut.unwrap_or_else(|e| match e.try_into_panic() {
             Ok(p) => std::panic::resume_unwind(p),
             Err(e) => Err(ObjectStoreError::JoinError { source: e }),
@@ -163,10 +175,17 @@ impl<T: ObjectStore + Clone> DeltaIOStorageBackend<T> {
         O: Send + 'static,
     {
         let store = store.clone();
+        let span = tracing::debug_span!(
+            "io_rt::object_store_op",
+            from = %from,
+            to = %to,
+            "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_TOOL,
+            "delta.zone" = crate::kernel::mlflow::ZONE_DELTA_RS,
+        );
         let fut = self
             .rt
             .get_handle()
-            .spawn(async move { f(&store, &from, &to).await });
+            .spawn(async move { f(&store, &from, &to).await }.instrument(span));
         fut.unwrap_or_else(|e| match e.try_into_panic() {
             Ok(p) => std::panic::resume_unwind(p),
             Err(e) => Err(ObjectStoreError::JoinError { source: e }),

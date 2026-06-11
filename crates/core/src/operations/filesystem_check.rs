@@ -258,49 +258,62 @@ impl std::future::IntoFuture for FileSystemCheckBuilder {
 
     fn into_future(self) -> Self::IntoFuture {
         let this = self;
+        let span = info_span!(
+            "deltalake::filesystem_check",
+            operation = "filesystem_check",
+            table_uri = %this.log_store.root_url(),
+            dry_run = this.dry_run,
+        );
 
-        Box::pin(async move {
-            let snapshot =
-                resolve_snapshot(&this.log_store, this.snapshot.clone(), true, None).await?;
+        Box::pin(
+            async move {
+                let snapshot =
+                    resolve_snapshot(&this.log_store, this.snapshot.clone(), true, None).await?;
 
-            let plan = this.create_fsck_plan(&snapshot).await?;
-            if this.dry_run {
-                return Ok((
-                    DeltaTable::new_with_state(this.log_store, DeltaTableState::new(snapshot)),
-                    FileSystemCheckMetrics {
-                        files_removed: plan.files_to_remove.into_iter().map(|f| f.path).collect(),
-                        dry_run: true,
-                    },
-                ));
+                let plan = this.create_fsck_plan(&snapshot).await?;
+                if this.dry_run {
+                    return Ok((
+                        DeltaTable::new_with_state(this.log_store, DeltaTableState::new(snapshot)),
+                        FileSystemCheckMetrics {
+                            files_removed: plan
+                                .files_to_remove
+                                .into_iter()
+                                .map(|f| f.path)
+                                .collect(),
+                            dry_run: true,
+                        },
+                    ));
+                }
+                if plan.files_to_remove.is_empty() {
+                    return Ok((
+                        DeltaTable::new_with_state(this.log_store, DeltaTableState::new(snapshot)),
+                        FileSystemCheckMetrics {
+                            dry_run: false,
+                            files_removed: Vec::new(),
+                        },
+                    ));
+                };
+                let operation_id = this.get_operation_id();
+                this.pre_execute(operation_id).await?;
+
+                let metrics = plan
+                    .execute(
+                        &snapshot,
+                        this.commit_properties.clone(),
+                        operation_id,
+                        this.get_custom_execute_handler(),
+                    )
+                    .await?;
+
+                this.post_execute(operation_id).await?;
+
+                let mut table =
+                    DeltaTable::new_with_state(this.log_store, DeltaTableState::new(snapshot));
+                table.update_state().await?;
+                Ok((table, metrics))
             }
-            if plan.files_to_remove.is_empty() {
-                return Ok((
-                    DeltaTable::new_with_state(this.log_store, DeltaTableState::new(snapshot)),
-                    FileSystemCheckMetrics {
-                        dry_run: false,
-                        files_removed: Vec::new(),
-                    },
-                ));
-            };
-            let operation_id = this.get_operation_id();
-            this.pre_execute(operation_id).await?;
-
-            let metrics = plan
-                .execute(
-                    &snapshot,
-                    this.commit_properties.clone(),
-                    operation_id,
-                    this.get_custom_execute_handler(),
-                )
-                .await?;
-
-            this.post_execute(operation_id).await?;
-
-            let mut table =
-                DeltaTable::new_with_state(this.log_store, DeltaTableState::new(snapshot));
-            table.update_state().await?;
-            Ok((table, metrics))
-        })
+            .instrument(span),
+        )
     }
 }
 
