@@ -64,17 +64,9 @@ percent-encoding-rfc3986 = { workspace = true }
 # runtime
 async-trait = { workspace = true }
 futures = { workspace = true }
-num_cpus = { workspace = true }
-tokio = { workspace = true, features = [
-    "macros",
-    "process",
-    "rt",
-    "rt-multi-thread",
-    "signal",
-    "sync",
-    "fs",
-    "parking_lot",
-] }
+# tokio is split per-target: wasm32-unknown-unknown only supports a small subset
+# (no threads/net/fs/process/signal → no `mio`/`libc`). See the target blocks below.
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 
 # caching
 foyer = { version = "0.22.2", optional = true, features = ["serde"] }
@@ -83,7 +75,6 @@ tempfile = { workspace = true, optional = true }
 # other deps (these should be organized and pulled into workspace.dependencies as necessary)
 cfg-if = "1"
 dashmap = "6"
-dirs = "6.0"
 either = "1.8"
 indexmap = "2.2.1"
 itertools = "0.14"
@@ -95,6 +86,26 @@ rand = "0.10"
 sqlparser = { version = "0.61.0" }
 humantime = { version = "2.1.0", optional = true }
 validator = { version = "0.19", features = ["derive"] }
+
+# Native-only deps: threads/fs/process/signal, cpu count, home dir. None of these
+# build for wasm32-unknown-unknown; the wasm target uses a single-threaded runtime
+# and a host-supplied object store instead.
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+num_cpus = { workspace = true }
+dirs = "6.0"
+delta_kernel_default_engine = { workspace = true }
+tokio = { workspace = true, features = [
+    "process",
+    "rt-multi-thread",
+    "signal",
+    "fs",
+    "parking_lot",
+] }
+
+# getrandom 0.4 (via `rand`) needs its JS backend selected by crate feature;
+# unlike 0.3, which uses the `getrandom_backend="wasm_js"` rustflag.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 arrow = { workspace = true, features = ["prettyprint"]}
@@ -124,15 +135,20 @@ datafusion = [
 datafusion-ext = ["datafusion"]
 json = ["parquet/json"]
 python = ["arrow/pyarrow"]
-native-tls = ["delta_kernel/default-engine-native-tls"]
-rustls = ["delta_kernel/default-engine-rustls"]
+# NOTE (wasm spike): kernel v0.25.0 relocated the default engine into the
+# separate `delta_kernel_default_engine` crate and dropped these TLS feature
+# names. Point them at `default-engine-base` so workspace feature resolution
+# succeeds; the actual TLS/engine wiring is being reworked separately.
+native-tls = ["delta_kernel/default-engine-base"]
+rustls = ["delta_kernel/default-engine-base"]
 cloud = ["object_store/cloud", "dep:humantime"]
 
 # enable caching some file I/O operations when scanning delta logs
 delta-cache = ["foyer", "tempfile", "url/serde"]
 
 # Experimental support for nanosecond timestamps primitive type
-nanosecond-timestamps = ["delta_kernel/nanosecond-timestamps"]
+# NOTE (wasm spike): kernel v0.25.0 dropped this feature; neutralized for now.
+nanosecond-timestamps = []
 
 integration_test = []
 

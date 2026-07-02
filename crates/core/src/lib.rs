@@ -122,7 +122,12 @@ pub use arrow;
 pub use datafusion;
 pub use parquet;
 
-#[cfg(not(any(feature = "rustls", feature = "native-tls")))]
+// On wasm the host supplies a fetch-backed object store, so no native TLS backend
+// (rustls/native-tls) is required.
+#[cfg(all(
+    not(any(feature = "rustls", feature = "native-tls")),
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
 compile_error!("You must enable at least one of the features: `rustls` or `native-tls`.");
 
 /// Creates and loads a DeltaTable from the given URL with current metadata.

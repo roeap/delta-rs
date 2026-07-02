@@ -309,7 +309,9 @@ impl<'de> Visitor<'de> for SnapshotVisitor {
             TableConfiguration::try_new(metadata, protocol, table_url.clone(), version as u64)
                 .map_err(de::Error::custom)?;
 
-        let snapshot = KernelSnapshot::new(log_segment, table_configuration);
+        // kernel v0.25.0 changed `Snapshot::new` to return a `Result`.
+        let snapshot =
+            KernelSnapshot::new(log_segment, table_configuration).map_err(de::Error::custom)?;
 
         Ok(Snapshot {
             inner: Arc::new(snapshot),

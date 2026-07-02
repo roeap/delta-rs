@@ -13,6 +13,8 @@ use url::Url;
 
 use super::normalize_table_url;
 use crate::kernel::Version;
+// The dedicated IO runtime is native-only (tokio threads).
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use crate::logstore::storage::IORuntime;
 use crate::logstore::{LogStoreRef, StorageConfig, object_store_factories};
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
@@ -64,7 +66,8 @@ pub struct DeltaTableConfig {
 
     #[serde(skip_serializing, skip_deserializing)]
     #[delta(skip)]
-    /// When a runtime handler is provided, all IO tasks are spawn in that handle
+    /// When a runtime handler is provided, all IO tasks are spawn in that handle.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     pub io_runtime: Option<IORuntime>,
 }
 
@@ -72,9 +75,14 @@ impl Default for DeltaTableConfig {
     fn default() -> Self {
         Self {
             require_files: true,
+            // wasm has no thread pool; use a fixed buffer size instead of num_cpus.
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
             log_buffer_size: num_cpus::get() * 4,
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            log_buffer_size: 4,
             log_batch_size: 1024,
             skip_stats: false,
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
             io_runtime: None,
         }
     }
@@ -237,6 +245,7 @@ impl DeltaTableBuilder {
     }
 
     /// Provide a custom runtime handle or runtime config
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     pub fn with_io_runtime(mut self, io_runtime: IORuntime) -> Self {
         self.table_config.io_runtime = Some(io_runtime);
         self
@@ -258,7 +267,9 @@ impl DeltaTableBuilder {
     pub fn build_storage(&self) -> DeltaResult<LogStoreRef> {
         debug!("build_storage() with {}", self.table_url);
 
+        #[allow(unused_mut)]
         let mut storage_config = StorageConfig::parse_options(self.storage_options())?;
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         if let Some(io_runtime) = self.table_config.io_runtime.clone() {
             storage_config = storage_config.with_io_runtime(io_runtime);
         }
@@ -305,17 +316,28 @@ enum UriType {
 /// Expand tilde (~) in path to home directory
 fn expand_tilde_path(path: &str) -> DeltaResult<PathBuf> {
     if path.starts_with("~/") || path == "~" {
-        let home_dir = dirs::home_dir().ok_or_else(|| {
-            DeltaTableError::InvalidTableLocation(
-                "Could not determine home directory for tilde expansion".to_string(),
-            )
-        })?;
+        // wasm has no home directory / local filesystem; tilde paths are unsupported.
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            Err(DeltaTableError::InvalidTableLocation(
+                "Tilde (~) path expansion is not supported on wasm; pass a fully-qualified URL"
+                    .to_string(),
+            ))
+        }
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            let home_dir = dirs::home_dir().ok_or_else(|| {
+                DeltaTableError::InvalidTableLocation(
+                    "Could not determine home directory for tilde expansion".to_string(),
+                )
+            })?;
 
-        if path == "~" {
-            Ok(home_dir)
-        } else {
-            let relative_path = &path[2..];
-            Ok(home_dir.join(relative_path))
+            if path == "~" {
+                Ok(home_dir)
+            } else {
+                let relative_path = &path[2..];
+                Ok(home_dir.join(relative_path))
+            }
         }
     } else {
         Ok(PathBuf::from(path))
@@ -337,10 +359,21 @@ fn resolve_uri_type(table_uri: impl AsRef<str>) -> DeltaResult<UriType> {
         Ok(url) => {
             let scheme = url.scheme().to_string();
             if url.scheme() == "file" {
-                Ok(UriType::LocalPath(url.to_file_path().map_err(|err| {
-                    let msg = format!("Invalid table location: {table_uri}\nError: {err:?}");
-                    DeltaTableError::InvalidTableLocation(msg)
-                })?))
+                // `Url::to_file_path` (and local filesystem access) is unavailable
+                // on wasm; `file://` tables aren't supported there.
+                #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+                {
+                    Err(DeltaTableError::InvalidTableLocation(format!(
+                        "file:// paths are not supported on wasm: {table_uri}"
+                    )))
+                }
+                #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+                {
+                    Ok(UriType::LocalPath(url.to_file_path().map_err(|err| {
+                        let msg = format!("Invalid table location: {table_uri}\nError: {err:?}");
+                        DeltaTableError::InvalidTableLocation(msg)
+                    })?))
+                }
             // NOTE this check is required to support absolute windows paths which may properly parse as url
             } else if known_schemes.contains(&scheme) {
                 Ok(UriType::Url(url))
@@ -388,6 +421,9 @@ pub fn parse_table_uri(table_uri: impl AsRef<str>) -> DeltaResult<Url> {
     let uri_type: UriType = resolve_uri_type(table_uri)?;
 
     let mut url = match uri_type {
+        // On wasm `resolve_uri_type` never yields a local path (no filesystem), so
+        // this arm is unreachable there and its fs APIs are compiled out.
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         UriType::LocalPath(path) => {
             let path = std::fs::canonicalize(&path).map_err(|err| {
                 let msg = format!(
@@ -404,6 +440,8 @@ pub fn parse_table_uri(table_uri: impl AsRef<str>) -> DeltaResult<Url> {
                 DeltaTableError::InvalidTableLocation(msg)
             })?
         }
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        UriType::LocalPath(_) => unreachable!("local paths are not produced on wasm"),
         UriType::Url(url) => url,
     };
 
@@ -421,6 +459,8 @@ pub fn ensure_table_uri(table_uri: impl AsRef<str>) -> DeltaResult<Url> {
 
     // If it is a local path, we need to create it if it does not exist.
     let url = match uri_type {
+        // Unreachable on wasm (no local paths); fs APIs compiled out there.
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         UriType::LocalPath(path) => {
             if !path.exists() {
                 std::fs::create_dir_all(&path).map_err(|err| {
@@ -441,6 +481,8 @@ pub fn ensure_table_uri(table_uri: impl AsRef<str>) -> DeltaResult<Url> {
                 DeltaTableError::InvalidTableLocation(msg)
             })?
         }
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        UriType::LocalPath(_) => unreachable!("local paths are not produced on wasm"),
         UriType::Url(url) => url,
     };
 

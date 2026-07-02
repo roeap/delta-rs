@@ -156,13 +156,17 @@ fn with_kernel_stats_output(
     builder: KernelScanBuilder,
     materialization: &FileStatsMaterialization,
 ) -> KernelScanBuilder {
+    // kernel v0.25.0 replaced the granular stats methods (with_skip_stats /
+    // include_all_stats_columns / with_stats_columns) with a single
+    // `with_stats(StatsOptions)`.
+    use delta_kernel::scan::StatsOptions;
     match materialization.stats_source_policy() {
-        StatsSourcePolicy::None => builder.with_skip_stats(true),
+        StatsSourcePolicy::None => builder.with_stats(StatsOptions::none()),
         StatsSourcePolicy::ParsedWithJsonFallback => match materialization.stats_projection() {
-            StatsProjection::None => builder.with_skip_stats(true),
-            StatsProjection::Full => builder.include_all_stats_columns(),
+            StatsProjection::None => builder.with_stats(StatsOptions::none()),
+            StatsProjection::Full => builder.with_stats(StatsOptions::all()),
             StatsProjection::PredicateColumns(columns) => {
-                builder.with_stats_columns(columns.iter().cloned().collect())
+                builder.with_stats(StatsOptions::struct_columns(columns.iter().cloned().collect()))
             }
             // The kernel API has no explicit numRecords only stats output mode. Use the
             // default scan output and materialize the row count schema when needed.

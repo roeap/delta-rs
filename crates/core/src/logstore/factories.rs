@@ -7,7 +7,9 @@ use dashmap::DashMap;
 use object_store::{DynObjectStore, path::Path};
 use url::Url;
 
-use super::{DeltaIOStorageBackend, LogStore, ObjectStoreRef, StorageConfig, default_logstore};
+use super::{LogStore, ObjectStoreRef, StorageConfig, default_logstore};
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+use super::DeltaIOStorageBackend;
 use crate::{DeltaResult, DeltaTableError};
 
 /// Factory registry to manage [`ObjectStoreFactory`] instances
@@ -39,8 +41,11 @@ impl ObjectStoreFactory for DefaultObjectStoreFactory {
         url: &Url,
         config: &StorageConfig,
     ) -> DeltaResult<(ObjectStoreRef, Path)> {
+        #[allow(unused_mut)]
         let (mut store, path) = default_parse_url_opts(url, &config.raw)?;
 
+        // The dedicated IO runtime wrapper is native-only.
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         if let Some(runtime) = &config.runtime {
             store =
                 Arc::new(DeltaIOStorageBackend::new(store, runtime.clone())) as Arc<DynObjectStore>;

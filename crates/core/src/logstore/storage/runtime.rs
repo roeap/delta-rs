@@ -1,23 +1,31 @@
-use std::ops::Range;
-use std::sync::OnceLock;
-
-use bytes::Bytes;
 use deltalake_derive::DeltaConfig;
-use futures::FutureExt;
-use futures::StreamExt;
-use futures::TryFutureExt;
-use futures::future::BoxFuture;
-use futures::stream::BoxStream;
-use object_store::path::Path;
-use object_store::{
-    CopyOptions, Error as ObjectStoreError, GetOptions, GetResult, ListResult, ObjectMeta,
-    ObjectStore, ObjectStoreExt, PutOptions, PutPayload, PutResult, RenameOptions,
-    Result as ObjectStoreResult,
-};
-use object_store::{MultipartUpload, PutMultipartOptions};
 use serde::{Deserialize, Serialize};
-use tokio::runtime::{Builder as RuntimeBuilder, Handle, Runtime};
-use tracing::Instrument as _;
+
+// The dedicated IO runtime and its storage-backend wrapper build a tokio
+// multi-threaded runtime and spawn onto it — neither works on wasm. Everything
+// except the plain `RuntimeConfig` struct below is therefore native-only.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+mod native {
+    use std::ops::Range;
+    use std::sync::OnceLock;
+
+    use bytes::Bytes;
+    use futures::FutureExt;
+    use futures::StreamExt;
+    use futures::TryFutureExt;
+    use futures::future::BoxFuture;
+    use futures::stream::BoxStream;
+    use object_store::path::Path;
+    use object_store::{
+        CopyOptions, Error as ObjectStoreError, GetOptions, GetResult, ListResult, ObjectMeta,
+        ObjectStore, ObjectStoreExt, PutOptions, PutPayload, PutResult, RenameOptions,
+        Result as ObjectStoreResult,
+    };
+    use object_store::{MultipartUpload, PutMultipartOptions};
+    use tokio::runtime::{Builder as RuntimeBuilder, Handle, Runtime};
+    use tracing::Instrument as _;
+
+    use super::RuntimeConfig;
 
 /// Creates static IO Runtime with optional configuration
 fn io_rt(config: Option<&RuntimeConfig>) -> &Runtime {
@@ -64,21 +72,6 @@ fn io_rt(config: Option<&RuntimeConfig>) -> &Runtime {
         };
         rt.expect("Failed to create a tokio runtime for IO.")
     })
-}
-
-/// Configuration for Tokio runtime
-#[derive(Debug, Clone, Serialize, Deserialize, Default, DeltaConfig)]
-pub struct RuntimeConfig {
-    /// Whether to use a multi-threaded runtime
-    pub(crate) multi_threaded: Option<bool>,
-    /// Number of worker threads to use
-    pub(crate) worker_threads: Option<usize>,
-    /// Name of the thread
-    pub(crate) thread_name: Option<String>,
-    /// Whether to enable IO
-    pub(crate) enable_io: Option<bool>,
-    /// Whether to enable time
-    pub(crate) enable_time: Option<bool>,
 }
 
 /// Provide custom Tokio RT or a runtime config
@@ -340,4 +333,27 @@ mod tests {
     async fn test_ioruntime_default() {
         let _ = IORuntime::default();
     }
+}
+} // mod native
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub use native::{DeltaIOStorageBackend, IORuntime};
+
+/// Configuration for the (native-only) dedicated Tokio IO runtime.
+///
+/// This is a plain (de)serializable config struct with no tokio dependency, so it
+/// is available on all targets (it is referenced by `StorageConfig`); it only has
+/// an effect where the tokio-backed [`IORuntime`] exists (native).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, DeltaConfig)]
+pub struct RuntimeConfig {
+    /// Whether to use a multi-threaded runtime
+    pub(crate) multi_threaded: Option<bool>,
+    /// Number of worker threads to use
+    pub(crate) worker_threads: Option<usize>,
+    /// Name of the thread
+    pub(crate) thread_name: Option<String>,
+    /// Whether to enable IO
+    pub(crate) enable_io: Option<bool>,
+    /// Whether to enable time
+    pub(crate) enable_time: Option<bool>,
 }

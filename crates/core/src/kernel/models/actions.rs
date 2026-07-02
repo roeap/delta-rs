@@ -772,7 +772,9 @@ impl TryFrom<&TableFeatures> for TableFeature {
     type Error = strum::ParseError;
 
     fn try_from(value: &TableFeatures) -> Result<Self, Self::Error> {
-        TableFeature::try_from(value.as_ref())
+        // kernel v0.25.0 made `TableFeature::try_from(&str)` infallible; adapt the
+        // `Infallible` inner error to this impl's `strum::ParseError` signature.
+        Ok(TableFeature::try_from(value.as_ref()).unwrap_or_else(|e| match e {}))
     }
 }
 

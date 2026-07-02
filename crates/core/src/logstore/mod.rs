@@ -53,8 +53,12 @@ use std::sync::{Arc, LazyLock};
 use bytes::Bytes;
 #[cfg(feature = "datafusion")]
 use datafusion::datasource::object_store::ObjectStoreUrl;
-use delta_kernel::engine::default::DefaultEngineBuilder;
-use delta_kernel::engine::default::executor::tokio::{
+// The tokio-based default engine lives in a separate, native-only crate as of
+// kernel v0.25.0. On wasm the host supplies its own engine instead.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+use delta_kernel_default_engine::DefaultEngineBuilder;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+use delta_kernel_default_engine::executor::tokio::{
     TokioBackgroundExecutor, TokioMultiThreadExecutor,
 };
 use delta_kernel::log_segment::LogSegment;
@@ -85,9 +89,12 @@ pub use self::factories::{
 };
 pub use self::storage::utils::commit_uri_from_version;
 pub use self::storage::{
-    DefaultObjectStoreRegistry, DeltaIOStorageBackend, IORuntime, ObjectStoreRef,
-    ObjectStoreRegistry, ObjectStoreRetryExt, client_options_from_certificate,
+    DefaultObjectStoreRegistry, ObjectStoreRef, ObjectStoreRegistry, ObjectStoreRetryExt,
 };
+// Native-only: the dedicated IO runtime and PEM-certificate client options depend
+// on threads / object_store cloud types absent on wasm.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub use self::storage::{DeltaIOStorageBackend, IORuntime, client_options_from_certificate};
 /// Convenience re-export of the object store crate
 pub use ::object_store;
 
@@ -587,6 +594,7 @@ impl<T: LogStore + ?Sized> LogStore for Arc<T> {
     }
 }
 
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub(crate) fn get_engine(store: Arc<dyn ObjectStore>) -> Arc<dyn Engine> {
     let handle = tokio::runtime::Handle::current();
     match handle.runtime_flavor() {
@@ -602,6 +610,14 @@ pub(crate) fn get_engine(store: Arc<dyn ObjectStore>) -> Arc<dyn Engine> {
         ),
         _ => panic!("unsupported runtime flavor"),
     }
+}
+
+/// On wasm the tokio-based `DefaultEngine` is unavailable; a wasm-compatible
+/// engine will be supplied by the `deltalake-wasm` facade (step 1). Until then
+/// this is a placeholder so the crate compiles for `wasm32-unknown-unknown`.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) fn get_engine(_store: Arc<dyn ObjectStore>) -> Arc<dyn Engine> {
+    unimplemented!("a wasm-compatible kernel engine is supplied by deltalake-wasm")
 }
 
 #[cfg(feature = "datafusion")]
@@ -646,7 +662,9 @@ pub fn to_uri(root: &Url, location: &Path) -> String {
                 location.as_ref()
             )
             .replace("file:///", "");
-            #[cfg(unix)]
+            // Treat wasm like unix here (single-slash `file://` stripping); wasm
+            // isn't unix but has no windows-style paths either.
+            #[cfg(any(unix, all(target_arch = "wasm32", target_os = "unknown")))]
             let uri = format!(
                 "{}/{}",
                 root.as_ref().trim_end_matches('/'),

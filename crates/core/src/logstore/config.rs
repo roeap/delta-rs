@@ -12,7 +12,10 @@ use object_store::{ObjectStore, path::Path, prefix::PrefixStore};
 use std::collections::HashMap;
 
 use super::storage::{CertificateConfig, LimitConfig};
-use super::{IORuntime, storage::runtime::RuntimeConfig};
+use super::storage::runtime::RuntimeConfig;
+// The dedicated IO runtime is native-only (tokio threads).
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+use super::IORuntime;
 use crate::{DeltaResult, DeltaTableError};
 
 /// A configuration type that can be incrementally populated from string key/value pairs.
@@ -102,6 +105,7 @@ pub struct StorageConfig {
     ///
     /// Configuration to set up a dedicated IO runtime to execute IO related operations or
     /// dedicated handle.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     pub runtime: Option<IORuntime>,
 
     /// Retry config for object stores
@@ -175,6 +179,7 @@ where
         };
 
         let result = ParseResult::<RuntimeConfig>::from_iter(&config.raw);
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         if let Some(runtime_config) = (!result.is_default).then_some(result.config) {
             config.runtime = Some(IORuntime::Config(runtime_config));
         };
@@ -228,11 +233,15 @@ impl StorageConfig {
             ..Default::default()
         };
 
+        // Parse the runtime options on all targets (to advance `remainder`), but
+        // only build an IO runtime natively.
         let (runtime, remainder): (RuntimeConfig, _) = try_parse_impl(&props.raw)?;
-        // NOTE: we only want to assign an actual runtime config we consumed an option
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         if props.raw.len() > remainder.len() {
             props.runtime = Some(IORuntime::Config(runtime));
         }
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        let _ = runtime;
 
         let result = ParseResult::<LimitConfig>::from_iter(remainder);
         result.raise_errors()?;
@@ -255,6 +264,7 @@ impl StorageConfig {
     }
 
     /// Attach a dedicated IO [`IORuntime`] used to execute storage operations.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     pub fn with_io_runtime(mut self, rt: IORuntime) -> Self {
         self.runtime = Some(rt);
         self

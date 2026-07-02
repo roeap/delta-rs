@@ -12,6 +12,9 @@ use crate::table::normalize_table_url;
 use crate::{DeltaResult, DeltaTableError};
 
 pub use retry_ext::ObjectStoreRetryExt;
+// `RuntimeConfig` is a plain (de)serializable config struct available on all
+// targets; the tokio-backed `IORuntime`/`DeltaIOStorageBackend` are native-only.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use runtime::{DeltaIOStorageBackend, IORuntime};
 
 pub(super) mod retry_ext;
@@ -109,6 +112,10 @@ pub struct CertificateConfig {
 }
 
 /// Read a PEM certificate file and build [`object_store::ClientOptions`] with it.
+///
+/// Native-only: `ClientOptions`/`Certificate` come from object_store's cloud
+/// features (absent on wasm) and this reads a local file.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub fn client_options_from_certificate(path: &str) -> DeltaResult<object_store::ClientOptions> {
     let mut buf = Vec::new();
     std::fs::File::open(path)
