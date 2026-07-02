@@ -32,6 +32,14 @@ wasm. Committed across three repos on branches (not pushed):
   flag: `datafusion-datasource-parquet` and the kernel declare `parquet` without
   `default-features = false`, and Cargo unions features graph-wide, so nothing
   downstream can turn `zstd` off.
+- **Dropping zstd/brotli is a real read limitation, not free.** parquet returns a
+  graceful error ("Disabled feature at compile time: zstd") on such pages — no
+  panic/corruption. Kept codecs (snappy, gzip via pure-Rust zlib-rs, lz4) cover
+  Spark/snappy-default tables, but **zstd-compressed tables become unreadable**,
+  and zstd is increasingly common in modern Delta writers. Proper fix (follow-up):
+  wire parquet's zstd *decompression* to a pure-Rust decoder (e.g. `ruzstd`) on
+  wasm — a parquet-crate change — or target `wasm32-wasip1` where `zstd-sys`
+  builds. brotli is rare in practice; low impact.
 - **The kernel's wasm-capable core is engine-agnostic and I/O-free** — the host
   supplies the `Engine`. delta-rs core is inseparable from the *arrow* engine, so
   wasm needs a real arrow-based `Engine` (the load-bearing next step), not just
