@@ -7,10 +7,19 @@ DataFusion `TableProvider` for querying Delta tables from a wasm host.
 ## Current status
 
 - `deltalake-core` **compiles** for `wasm32-unknown-unknown` (`--no-default-features`)
-  and the native build is unaffected.
+  and the **whole native workspace** (`cargo build --workspace`, incl. `python`) builds
+  against the pinned upstream kernel.
 - It does **not run** on wasm yet: `logstore::get_engine` is an `unimplemented!()`
   stub on wasm. A wasm-compatible kernel `Engine` and the `deltalake-wasm` facade
   crate are the next step.
+- `nanosecond-timestamps` is **disabled in the Python crate's default features** for the
+  spike (`python/Cargo.toml`). The feature is backed by kernel symbols
+  (`PrimitiveType::TimestampNanos`, `Scalar::TimestampNanos`, `TableFeature::TimestampNanos`,
+  `DataType::TIMESTAMP_NANOS`) that live only in the buoyant-data kernel fork, not the
+  pinned upstream `delta_kernel` v0.25.0. The delta-rs gating is complete and correct; the
+  feature just can't be satisfied by the pinned kernel, so leaving it on default-broke the
+  workspace build (Cargo unions features graph-wide). Re-add it once the kernel dep is
+  reconciled.
 
 Build it with:
 
@@ -54,8 +63,15 @@ these are `cfg`-gated to `cfg(not(all(target_arch = "wasm32", target_os = "unkno
 ## Also required for the spike (not in this repo)
 
 - `delta-kernel-rs` (`wasm-kernel-compat`): `kernel/Cargo.toml` makes the
-  `object_store` cloud features (which pull `ring`/`hyper`) native-only.
+  `object_store` cloud features (which pull `ring`/`hyper`) native-only. Also
+  `default-engine/src/filesystem.rs`: `ObjectStoreStorageHandler::new` is made `pub`
+  (was `pub(crate)` after the v0.25.0 relocation) so delta-rs's DataFusion engine can
+  construct it directly, as it did pre-relocation.
 - `arrow-rs` (`wasm-codec-58.3.0`): the parquet codec-defaults change above.
+
+Native code that referenced the pre-v0.25.0 `delta_kernel::engine::default::*` paths
+(`crates/core/src/delta_datafusion/engine/{file_formats,storage}.rs`) now imports the
+relocated types from the `delta_kernel_default_engine` crate.
 
 ## Next steps
 
