@@ -16,12 +16,19 @@ documentation = "https://docs.rs/deltalake"
 repository = "https://github.com/delta-io/delta.rs"
 
 [workspace.dependencies]
-#delta_kernel = { package = "buoyant_kernel", path = "../delta-kernel-rs/kernel", features = [
-delta_kernel = { package = "buoyant_kernel", git = "https://github.com/buoyant-data/delta-kernel-rs", branch = "buoyant/main", features = [
+# wasm spike: local wasm-kernel-compat checkout (package `delta_kernel`, v0.25.0).
+delta_kernel = { path = "../delta-kernel-rs/kernel", features = [
+#delta_kernel = { package = "buoyant_kernel", git = "https://github.com/buoyant-data/delta-kernel-rs", branch = "buoyant/main", features = [
 #delta_kernel = { package = "buoyant_kernel", version = "0.24.0, <0.24.100", features = [
     "arrow-58",
     "internal-api",
+    # v0.25.0 gates the `engine` module + arrow_conversion/arrow_data/arrow_expression
+    # submodules (used throughout delta-rs core) behind default-engine-base.
+    "default-engine-base",
 ] }
+# v0.25.0 relocated the tokio-based DefaultEngine into its own crate. It is
+# native-only (hard tokio rt-multi-thread); on wasm the host supplies its own engine.
+delta_kernel_default_engine = { path = "../delta-kernel-rs/default-engine" }
 
 
 # arrow
@@ -76,6 +83,26 @@ opentelemetry-otlp = { version = "0.31", features = ["http-proto"] }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 num_cpus = { version = "1" }
+
+# wasm spike: patch parquet (and the arrow family it pins) to a local arrow-rs
+# fork whose parquet `default` features drop the C-backed zstd/brotli codecs, so
+# the graph builds for wasm32-unknown-unknown. Same 58.3.0 version as crates.io,
+# so native builds are unaffected except for the missing zstd/brotli defaults.
+[patch.crates-io]
+parquet = { path = "../arrow-rs/parquet" }
+arrow = { path = "../arrow-rs/arrow" }
+arrow-arith = { path = "../arrow-rs/arrow-arith" }
+arrow-array = { path = "../arrow-rs/arrow-array" }
+arrow-buffer = { path = "../arrow-rs/arrow-buffer" }
+arrow-cast = { path = "../arrow-rs/arrow-cast" }
+arrow-data = { path = "../arrow-rs/arrow-data" }
+arrow-ipc = { path = "../arrow-rs/arrow-ipc" }
+arrow-json = { path = "../arrow-rs/arrow-json" }
+arrow-ord = { path = "../arrow-rs/arrow-ord" }
+arrow-row = { path = "../arrow-rs/arrow-row" }
+arrow-schema = { path = "../arrow-rs/arrow-schema" }
+arrow-select = { path = "../arrow-rs/arrow-select" }
+arrow-string = { path = "../arrow-rs/arrow-string" }
 
 [workspace.metadata.typos]
 files.extend-exclude = ["CHANGELOG.md", "crates/benchmarks/queries/tpcds/*.sql"]

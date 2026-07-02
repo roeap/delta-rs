@@ -9,3 +9,10 @@ rustflags = [
   "-C", "link-arg=-undefined",
   "-C", "link-arg=dynamic_lookup",
 ]
+
+# wasm spike: getrandom 0.3 needs the JS backend selected via cfg on
+# wasm32-unknown-unknown (pulled transitively by uuid/rand in deltalake-core).
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "--cfg", 'getrandom_backend="wasm_js"',
+]
