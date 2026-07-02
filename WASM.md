@@ -59,9 +59,5 @@ these are `cfg`-gated to `cfg(not(all(target_arch = "wasm32", target_os = "unkno
 
 ## Next steps
 
-1. `deltalake-wasm` facade crate with a real wasm `Engine` (replacing the
-   `get_engine` stub) and a read-only `TableProvider` adapted from
-   `delta_datafusion::table_provider::next`.
-2. Deletion vectors are out of scope for the first iteration (fail loud on tables
-   that contain them).
-3. A `wasm-bindgen` harness that reads a table over a fetch-backed object store.
+See [`WASM_NOTES.md`](./WASM_NOTES.md) for the decisions, learnings, and detailed
+next steps (the wasm `Engine` design, the `deltalake-wasm` facade, and CI hygiene).
