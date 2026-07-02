@@ -8,14 +8,14 @@ use datafusion::execution::{
 use delta_kernel::engine::parse_json as arrow_parse_json;
 use delta_kernel::{
     EngineData, FileDataReadResultIterator, FileMeta, FilteredEngineData, JsonHandler,
-    ParquetHandler, PredicateRef,
-    engine::default::{
-        executor::tokio::{TokioBackgroundExecutor, TokioMultiThreadExecutor},
-        json::DefaultJsonHandler,
-        parquet::DefaultParquetHandler,
-    },
-    error::DeltaResult as KernelResult,
-    schema::SchemaRef,
+    ParquetHandler, PredicateRef, error::DeltaResult as KernelResult, schema::SchemaRef,
+};
+// kernel v0.25.0 relocated the tokio DefaultEngine out of `delta_kernel::engine::default`
+// into the separate `delta_kernel_default_engine` crate (native-only).
+use delta_kernel_default_engine::{
+    executor::tokio::{TokioBackgroundExecutor, TokioMultiThreadExecutor},
+    json::DefaultJsonHandler,
+    parquet::DefaultParquetHandler,
 };
 use itertools::Itertools;
 use tokio::runtime::{Handle, RuntimeFlavor};

@@ -423,8 +423,8 @@ async fn column_mapping_cdf_write_is_kernel_readable() -> TestResult {
     use datafusion::prelude::{col, lit};
     use delta_kernel::committer::FileSystemCommitter;
     use delta_kernel::engine::arrow_data::ArrowEngineData;
-    use delta_kernel::engine::default::DefaultEngineBuilder;
-    use delta_kernel::engine::default::executor::tokio::TokioMultiThreadExecutor;
+    use delta_kernel_default_engine::DefaultEngineBuilder;
+    use delta_kernel_default_engine::executor::tokio::TokioMultiThreadExecutor;
     use delta_kernel::object_store::DynObjectStore;
     use delta_kernel::object_store::local::LocalFileSystem;
     use delta_kernel::schema::{DataType as KernelDataType, StructField, StructType};
@@ -524,8 +524,8 @@ async fn create_kernel_cm_table(properties: &[(&str, &str)]) -> TestResult<(Temp
     use std::sync::Arc;
 
     use delta_kernel::committer::FileSystemCommitter;
-    use delta_kernel::engine::default::DefaultEngineBuilder;
-    use delta_kernel::engine::default::executor::tokio::TokioMultiThreadExecutor;
+    use delta_kernel_default_engine::DefaultEngineBuilder;
+    use delta_kernel_default_engine::executor::tokio::TokioMultiThreadExecutor;
     use delta_kernel::object_store::DynObjectStore;
     use delta_kernel::object_store::local::LocalFileSystem;
     use delta_kernel::schema::{DataType as KernelDataType, StructField, StructType};

@@ -124,7 +124,16 @@ features = [
 ]
 
 [features]
-default = ["rustls", "nanosecond-timestamps"]
+# NOTE (wasm spike): `nanosecond-timestamps` is dropped from the defaults here.
+# The feature is backed by kernel symbols (`PrimitiveType::TimestampNanos`,
+# `DataType::TIMESTAMP_NANOS`, `Scalar::TimestampNanos`, `TableFeature::TimestampNanos`)
+# that exist only in the buoyant-data kernel fork, not the upstream `delta_kernel`
+# v0.25.0 the spike pins. Enabling it by default turned it on graph-wide for
+# `deltalake-core` (Cargo unions features), which then failed to name those symbols.
+# The `nanosecond-timestamps` passthrough below is left in place so it can be turned
+# on explicitly when built against a fork that carries the symbols. Re-add it to the
+# defaults once the kernel dependency is reconciled.
+default = ["rustls"]
 native-tls = ["deltalake/s3-native-tls", "deltalake/glue"]
 rustls = ["deltalake/s3", "deltalake/glue"]
 nanosecond-timestamps = ["deltalake/nanosecond-timestamps"]
