@@ -1,6 +1,7 @@
 pub(crate) use self::to_datafusion::*;
 pub(crate) use self::to_kernel::*;
 
+mod opaque;
 mod to_datafusion;
 mod to_json;
 mod to_kernel;
@@ -74,6 +75,21 @@ mod tests {
         let df_expr = col("a").gt(col("b")).and(col("c").gt(col("d")).not());
         let delta_expr = to_delta_expression(&df_expr).unwrap();
         let df_expr_roundtrip = to_datafusion_expr(&delta_expr, &DataType::BOOLEAN).unwrap();
+        assert_eq!(df_expr, df_expr_roundtrip);
+    }
+
+    #[test]
+    fn test_roundtrip_opaque_predicate() {
+        use datafusion::functions::expr_fn::starts_with;
+        // An untranslatable boolean predicate round-trips through the opaque
+        // seam: DF expr -> kernel opaque predicate -> original DF expr.
+        let df_expr = starts_with(col("part"), lit("ab"));
+        let delta_pred = try_opaque_predicate(&df_expr).expect("opaque wrap");
+        let df_expr_roundtrip = to_datafusion_expr(
+            &delta_kernel::expressions::Expression::Predicate(Box::new(delta_pred)),
+            &DataType::BOOLEAN,
+        )
+        .unwrap();
         assert_eq!(df_expr, df_expr_roundtrip);
     }
 }

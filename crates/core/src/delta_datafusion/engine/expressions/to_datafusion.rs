@@ -20,6 +20,7 @@ use delta_kernel::expressions::{
 use delta_kernel::schema::DataType;
 use itertools::Itertools;
 
+use crate::delta_datafusion::engine::expressions::opaque::recover_datafusion_expr;
 use crate::delta_datafusion::engine::expressions::to_json::to_json;
 
 /// Converts a Delta kernel Expression into a DataFusion Expr.
@@ -176,7 +177,14 @@ pub(crate) fn predicate_to_df(predicate: &Predicate, output_type: &DataType) -> 
         Predicate::Unary(expr) => unary_pred_to_df(expr, output_type),
         Predicate::Binary(expr) => binary_pred_to_df(expr, output_type),
         Predicate::Junction(expr) => junction_to_df(expr, output_type),
-        Predicate::Opaque(_) => not_impl_err!("Opaque predicates are not yet supported"),
+        // Recover our own opaque predicates (produced by `to_delta_predicate`)
+        // back to the original DataFusion expression, closing the parquet
+        // pushdown round-trip. Opaque predicates from any other producer, and
+        // `Unknown`, remain unsupported.
+        Predicate::Opaque(_) => match recover_datafusion_expr(predicate) {
+            Some(expr) => Ok(expr),
+            None => not_impl_err!("Opaque predicates are not yet supported"),
+        },
         Predicate::Unknown(_) => not_impl_err!("Unknown predicates are not yet supported"),
     }
 }

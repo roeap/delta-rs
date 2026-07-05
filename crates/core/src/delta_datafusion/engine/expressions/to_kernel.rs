@@ -10,16 +10,128 @@ use delta_kernel::expressions::{
 };
 use delta_kernel::schema::{DataType, DecimalType, PrimitiveType};
 
+use crate::delta_datafusion::engine::expressions::opaque::{
+    DataFusionOpaquePredicateOp, build_opaque_predicate,
+};
 use crate::kernel::scalars::ScalarExt;
 
 /// Converts a DataFusion expression to a Delta predicate.
 ///
 /// If the expression converts to a Delta predicate, returns it directly.
 /// Otherwise, wraps the expression as a boolean expression predicate.
+///
+/// This is the *structural* conversion only. Expressions the kernel predicate
+/// model cannot represent (UDFs, `LIKE`, `CASE`, regex, most scalar functions…)
+/// are an error here; callers that want partition pruning for such predicates
+/// invoke [`try_opaque_predicate`] as an explicit fallback *after* their own
+/// safety guards (e.g. schema-override type-mismatch checks) — opaque wrapping
+/// is deliberately not folded into this function so it cannot bypass them.
 pub(crate) fn to_delta_predicate(expr: &Expr) -> Result<Predicate> {
     match to_delta_expression(&normalize_delta_predicate_expr(expr)?)? {
         Expression::Predicate(pred) => Ok(pred.as_ref().clone()),
         expr => Ok(Predicate::BooleanExpression(expr)),
+    }
+}
+
+/// Attempts to wrap an untranslatable boolean DataFusion predicate as a kernel
+/// opaque predicate that evaluates the original `Expr`, extending partition
+/// pruning to arbitrary DataFusion predicates while never wrongly pruning.
+///
+/// Returns `None` (leaving the caller to treat the predicate as unsupported)
+/// unless ALL of the following hold:
+/// - the node is plausibly boolean-valued (see [`is_probably_boolean`]);
+/// - the expression is non-volatile (`random()` etc. must never prune);
+/// - every column reference converts to a kernel [`ColumnName`].
+///
+/// Callers MUST run any correctness guards (e.g. schema-override type mismatch)
+/// before invoking this — the op evaluates the DataFusion `Expr` verbatim, so a
+/// predicate that is unsafe to push structurally is equally unsafe to push as
+/// opaque. Opaque predicates are always constructed via the arrow adaptor so the
+/// kernel `ARROW_HANDLER` evaluator recognizes them.
+pub(crate) fn try_opaque_predicate(expr: &Expr) -> Option<Predicate> {
+    let expr = normalize_delta_predicate_expr(expr).ok()?;
+    let expr = &expr;
+    if !is_probably_boolean(expr) || expr.is_volatile() {
+        return None;
+    }
+
+    // Collect the referenced columns as (DataFusion leaf name, kernel column
+    // expression) pairs, kept in a stable order so the op can align embedded
+    // args with the names it rebuilds the evaluation batch under. Reuse the
+    // structural column-conversion path so nested/field access stays consistent.
+    let mut column_refs: Vec<_> = expr.column_refs().into_iter().collect();
+    column_refs.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut names = Vec::with_capacity(column_refs.len());
+    let mut columns = Vec::with_capacity(column_refs.len());
+    for column in column_refs {
+        match to_delta_expression(&Expr::Column(column.clone())) {
+            Ok(kernel_expr @ Expression::Column(_)) => {
+                names.push(column.name.clone());
+                columns.push(kernel_expr);
+            }
+            _ => return None,
+        }
+    }
+
+    let op = DataFusionOpaquePredicateOp::new(expr.clone(), names);
+    Some(build_opaque_predicate(op, columns))
+}
+
+/// Heuristic: is this DataFusion expression plausibly boolean-valued, so that
+/// wrapping it as a boolean opaque predicate is meaningful?
+///
+/// We only have the logical `Expr` here (no schema), so this restricts to node
+/// kinds that are obviously boolean-returning. Non-boolean nodes (arithmetic,
+/// projections, bare columns) are NOT wrapped — they belong in expression
+/// position, which v1 leaves as a hard error.
+fn is_probably_boolean(expr: &Expr) -> bool {
+    match expr {
+        Expr::Like(_)
+        | Expr::SimilarTo(_)
+        | Expr::IsTrue(_)
+        | Expr::IsFalse(_)
+        | Expr::IsUnknown(_)
+        | Expr::IsNotTrue(_)
+        | Expr::IsNotFalse(_)
+        | Expr::IsNotUnknown(_)
+        | Expr::IsNull(_)
+        | Expr::IsNotNull(_)
+        | Expr::Between(_)
+        | Expr::InList(_)
+        | Expr::InSubquery(_) => true,
+        Expr::Not(inner) => is_probably_boolean(inner),
+        Expr::BinaryExpr(BinaryExpr { op, .. }) => matches!(
+            op,
+            Operator::Eq
+                | Operator::NotEq
+                | Operator::Lt
+                | Operator::LtEq
+                | Operator::Gt
+                | Operator::GtEq
+                | Operator::And
+                | Operator::Or
+                | Operator::IsDistinctFrom
+                | Operator::IsNotDistinctFrom
+                | Operator::RegexMatch
+                | Operator::RegexIMatch
+                | Operator::RegexNotMatch
+                | Operator::RegexNotIMatch
+                | Operator::LikeMatch
+                | Operator::ILikeMatch
+                | Operator::NotLikeMatch
+                | Operator::NotILikeMatch
+        ),
+        // A boolean-returning scalar function (`starts_with`, `ends_with`,
+        // `contains`, `regexp_like`, custom boolean UDFs, …). We cannot check
+        // the return type without a schema, so accept scalar functions and rely
+        // on the columnar evaluator: a non-boolean result errors and, via the
+        // "never fail the scan" contract, resolves to "don't know".
+        Expr::ScalarFunction(_) => true,
+        // A CASE with a boolean output can only be told apart with a schema;
+        // accept it for the same reason as scalar functions.
+        Expr::Case(_) => true,
+        _ => false,
     }
 }
 
@@ -467,6 +579,68 @@ mod tests {
         let expr = col("part").in_list(vec![lit("a"), lit(ScalarValue::Utf8(None))], true);
 
         assert_eq!(normalize_delta_predicate_expr(&expr).unwrap(), expr);
+    }
+
+    #[test]
+    fn test_structural_conversion_rejects_untranslatable() {
+        use datafusion::functions::expr_fn::starts_with;
+        // The structural conversion no longer auto-wraps; untranslatable
+        // predicates are an error here (opaque wrapping is an explicit caller
+        // fallback via `try_opaque_predicate`).
+        let expr = starts_with(col("part"), lit("ab"));
+        assert!(to_delta_predicate(&expr).is_err());
+    }
+
+    #[test]
+    fn test_opaque_wraps_untranslatable_boolean_predicate() {
+        use datafusion::functions::expr_fn::starts_with;
+        // `starts_with(part, 'ab')` has no kernel structural representation, so
+        // `try_opaque_predicate` wraps it as an opaque predicate.
+        let expr = starts_with(col("part"), lit("ab"));
+        let predicate = try_opaque_predicate(&expr).expect("opaque wrap");
+        assert!(matches!(predicate, Predicate::Opaque(_)));
+    }
+
+    #[test]
+    fn test_opaque_wraps_comparison_over_untranslatable_scalar_fn() {
+        use datafusion::functions::expr_fn::substr;
+        // `substr(part, 1) = 'ab'` — the comparison is structural but its left
+        // operand is an untranslatable scalar function, so the whole predicate
+        // becomes opaque.
+        let expr = substr(col("part"), lit(1i64)).eq(lit("ab"));
+        let predicate = try_opaque_predicate(&expr).expect("opaque wrap");
+        assert!(matches!(predicate, Predicate::Opaque(_)));
+    }
+
+    #[test]
+    fn test_volatile_expr_not_wrapped() {
+        use datafusion::functions::expr_fn::random;
+        // `random() > 0.5` is boolean but volatile; it must never prune.
+        let expr = random().gt(lit(0.5));
+        assert!(to_delta_predicate(&expr).is_err());
+        assert!(try_opaque_predicate(&expr).is_none());
+    }
+
+    #[test]
+    fn test_non_boolean_node_kind_not_wrapped() {
+        // A non-boolean node kind (arithmetic) is never wrapped as an opaque
+        // *predicate*, even if it happens to reference untranslatable children.
+        // (`try_opaque_predicate` is only ever called from predicate position;
+        // this guards the boolean-kind heuristic itself.)
+        let expr = col("a") + col("b");
+        assert!(try_opaque_predicate(&expr).is_none());
+    }
+
+    #[test]
+    fn test_boolean_scalar_fn_wrapped_relies_on_evaluator() {
+        use datafusion::functions::expr_fn::substr;
+        // A bare scalar function in predicate position IS wrapped: we cannot
+        // prove its return type without a schema, so we accept it and rely on
+        // the columnar evaluator to degrade a non-boolean result to "don't
+        // know" (documented contract).
+        let expr = substr(col("part"), lit(1i64));
+        let predicate = try_opaque_predicate(&expr).expect("opaque wrap");
+        assert!(matches!(predicate, Predicate::Opaque(_)));
     }
 
     #[test]
