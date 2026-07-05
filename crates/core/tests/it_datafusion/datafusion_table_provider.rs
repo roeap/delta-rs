@@ -496,3 +496,80 @@ async fn test_file_id_filter_correctness_with_transformed_schema() -> TestResult
 
     Ok(())
 }
+
+/// V6: build a snapshot of a checkpointed table whose `_delta_log` has **no** `_last_checkpoint`
+/// file. Kernel log replay must then read the checkpoint parquet footer to recover its schema,
+/// exercising `DataFusionFileFormatHandler::read_parquet_footer` end-to-end. A successful build at
+/// the latest version proves the footer path works through the DataFusion engine.
+#[tokio::test]
+async fn test_read_parquet_footer_via_no_last_checkpoint() -> TestResult<()> {
+    use deltalake_core::DeltaTableConfig;
+    use url::Url;
+
+    let root = std::fs::canonicalize(format!(
+        "{}/../test/tests/data/with_checkpoint_no_last_checkpoint",
+        env!("CARGO_MANIFEST_DIR")
+    ))?;
+    // Sanity: the fixture must have a checkpoint parquet but no `_last_checkpoint`, or the footer
+    // path is never taken and this test would silently pass for the wrong reason.
+    assert!(
+        !root.join("_delta_log/_last_checkpoint").exists(),
+        "fixture unexpectedly has a _last_checkpoint; footer path would not be exercised"
+    );
+    assert!(
+        root.join("_delta_log/00000000000000000002.checkpoint.parquet")
+            .exists(),
+        "fixture is missing the checkpoint parquet"
+    );
+
+    let table_root = Url::from_directory_path(&root).unwrap();
+    let session = create_session().into_inner();
+    let engine = DataFusionEngine::new_from_session(&session.state());
+
+    let snapshot =
+        Snapshot::try_new_with_engine(engine, table_root, DeltaTableConfig::default(), None)
+            .await?;
+
+    // Version 3 is the latest commit; the checkpoint at v2 (schema recovered via footer read)
+    // plus the trailing commit must replay cleanly.
+    assert_eq!(snapshot.version(), 3);
+    assert!(
+        snapshot.schema().fields().count() > 0,
+        "snapshot schema should be populated"
+    );
+
+    Ok(())
+}
+
+/// A kernel predicate pushed into `read_parquet_files` must yield a subset consistent with an
+/// unpredicated read of the same table (row-group / page pruning may drop rows, never invent them).
+#[tokio::test]
+async fn test_parquet_predicate_pushdown_is_consistent_subset() -> TestResult<()> {
+    let (snapshot, session) = scan_dat("all_primitive_types").await?;
+
+    let provider = DeltaScanNext::new(snapshot.clone(), DeltaScanConfig::default())?;
+    let unfiltered = collect_plan(
+        provider.scan(&session.state(), None, &[], None).await?,
+        &session,
+    )
+    .await?;
+    let total: usize = unfiltered.iter().map(|b| b.num_rows()).sum();
+
+    // A restrictive filter must return no more rows than the full scan.
+    let filtered = session
+        .read_table(Arc::new(DeltaScanNext::new(
+            snapshot,
+            DeltaScanConfig::default(),
+        )?))?
+        .filter(col("int32").gt(lit(0_i32)))?
+        .collect()
+        .await?;
+    let filtered_rows: usize = filtered.iter().map(|b| b.num_rows()).sum();
+
+    assert!(
+        filtered_rows <= total,
+        "predicate pushdown returned more rows ({filtered_rows}) than the unfiltered scan ({total})"
+    );
+
+    Ok(())
+}

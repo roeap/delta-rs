@@ -56,6 +56,9 @@ strum = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true, default-features = false, features = ["clock"] }
 regex = { workspace = true }
+# Kept at 0.13 to match the version delta_kernel links, so the presigned-URL fetch
+# path in the DataFusion engine shares reqwest's error type with the kernel.
+reqwest = { version = "0.13", default-features = false }
 thiserror = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v4"] }
 url = { workspace = true, features = ["serde"] }
