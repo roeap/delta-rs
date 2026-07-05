@@ -104,6 +104,14 @@ tokio = { workspace = true, features = [
     "fs",
     "parking_lot",
 ] }
+# Re-enable DataFusion's `compression` feature natively only: it pulls
+# async-compression's C codecs (liblzma/bzip2/zstd-sys), which cannot build for
+# wasm32-unknown-unknown. The workspace declaration disables it for all targets.
+datafusion = { workspace = true, optional = true, features = ["compression"] }
+# The pinned arrow-rs fork drops the C-backed zstd/brotli codecs from parquet's
+# *defaults* so the crate builds for wasm; opt back in natively so the parquet
+# writer keeps supporting them (delta writers default to zstd).
+parquet = { workspace = true, features = ["zstd", "brotli"] }
 
 # getrandom 0.4 (via `rand`) needs its JS backend selected by crate feature;
 # unlike 0.3, which uses the `getrandom_backend="wasm_js"` rustflag.

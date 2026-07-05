@@ -47,8 +47,23 @@ object_store = { version = "0.13.2" }
 parquet = { version = "58" }
 
 # datafusion 54
-datafusion = { version = "54.0.0" }
-datafusion-datasource = { version = "54.0.0" }
+# Default features minus `compression`: async-compression pulls C codecs
+# (liblzma/bzip2/zstd-sys) that cannot build for wasm32-unknown-unknown.
+# Native builds re-enable `compression` via a target-gated dependency entry
+# in crates/core, so the native feature set is unchanged.
+datafusion = { version = "54.0.0", default-features = false, features = [
+    "nested_expressions",
+    "crypto_expressions",
+    "datetime_expressions",
+    "encoding_expressions",
+    "regex_expressions",
+    "string_expressions",
+    "unicode_expressions",
+    "parquet",
+    "recursive_protection",
+    "sql",
+] }
+datafusion-datasource = { version = "54.0.0", default-features = false }
 datafusion-physical-expr-adapter = { version = "54.0.0" }
 datafusion-ffi = { version = "54.0.0" }
 datafusion-proto = { version = "54.0.0" }
