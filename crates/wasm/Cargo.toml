@@ -1,0 +1,66 @@
+[package]
+name = "deltalake-wasm"
+version = "0.1.0"
+authors.workspace = true
+keywords.workspace = true
+readme.workspace = true
+edition.workspace = true
+homepage.workspace = true
+description = "Browser (wasm32-unknown-unknown) facade for delta-rs: fetch-backed storage, delta-log priming, and a read-only DataFusion query surface"
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+deltalake-core = { version = "1", path = "../core", default-features = false, features = [
+    "datafusion",
+] }
+
+arrow-ipc = { workspace = true }
+datafusion = { workspace = true }
+object_store = { workspace = true }
+
+async-trait = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+url = { workspace = true }
+
+# Native builds of deltalake-core require a TLS backend feature; the wasm target
+# needs none (the host supplies a fetch-backed store), so re-add it natively only.
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+deltalake-core = { version = "1", path = "../core", default-features = false, features = [
+    "datafusion",
+    "rustls",
+] }
+
+# wasm glue: the fetch store and the wasm-bindgen surface only exist on
+# wasm32-unknown-unknown; the rlib API above compiles (and is tested) natively.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+bytes = { workspace = true }
+chrono = { workspace = true }
+console_error_panic_hook = "0.1"
+js-sys = "0.3"
+# Kept at 0.13 to match deltalake-core / delta_kernel; wasm backend = browser fetch.
+reqwest = { version = "0.13", default-features = false }
+send_wrapper = { version = "0.6", features = ["futures"] }
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+[dev-dependencies]
+arrow = { workspace = true }
+arrow-array = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+
+# tokio's multi-threaded runtime does not compile for wasm; the native tests are the
+# only ones that need it.
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = "0.3"
