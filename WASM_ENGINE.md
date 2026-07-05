@@ -1,6 +1,6 @@
 # WASM engine — implementation roadmap & handover index
 
-> **Status: planned, ready to execute.** This is the index for the wasm-engine work
+> **Status: done — D1–D5 all landed.** This is the index for the wasm-engine work
 > ("Phase A" in `../mangrove/WASM_QUERY_PREVIEW.md`): make delta-rs *run* (not just
 > compile) on `wasm32-unknown-unknown` by building a wasm-compatible delta-kernel
 > `Engine` and a `deltalake-wasm` facade crate. Background: [`WASM.md`](./WASM.md)
@@ -105,7 +105,7 @@ D3 (opaque bridge, native)  ────┘
 | [`WASM_ENGINE_D2_EXECUTOR.md`](./WASM_ENGINE_D2_EXECUTOR.md) | `ExecutorHandle`/`InlineExecutor`; neutralize tokio bridges; first wasm compile of the `datafusion` feature | — (rebases on D1's constructor if D1 lands first) | **Fable** (highest uncertainty: cfg surgery, waker/poll semantics) | **done — f1f11885…4822f96e (+ arrow-rs fork e76f4cfda); deviations in D2 doc** |
 | [`WASM_ENGINE_D3_OPAQUE.md`](./WASM_ENGINE_D3_OPAQUE.md) | `DataFusionOpaquePredicateOp`; wire `to_kernel`/`to_datafusion` catch-alls; pruning tests | — | **Opus** (correctness-sensitive seam, well-scoped after V5 spike) | **done — unsigned local; needs kernel-fork patch (see below); deviations in D3 doc** |
 | [`WASM_ENGINE_D4_FACADE.md`](./WASM_ENGINE_D4_FACADE.md) | `deltalake-wasm` crate: fetch store, `PrimedStore`, snapshot/query API, wasm-bindgen, smoke tests | D1 + D2 | **Fable** (new crate, wasm tooling unknowns, e2e) | **done — unsigned local (9eb2c329…); needs kernel-fork patch 81b7cb95; deviations in D4 doc** |
-| [`WASM_ENGINE_D5_CI.md`](./WASM_ENGINE_D5_CI.md) | Path deps → git refs; revert obsolete fork deltas; CI matrix; fold docs | D1–D4 | **Sonnet** (mechanical) | not started |
+| [`WASM_ENGINE_D5_CI.md`](./WASM_ENGINE_D5_CI.md) | Path deps → git refs; revert obsolete fork deltas; CI matrix; fold docs | D1–D4 | **Sonnet** (mechanical) | **done — see D5 doc for commit refs** |
 
 Model recommendations assume Claude Code sessions; they track implementation
 complexity/uncertainty, not doc length.
@@ -125,10 +125,14 @@ doc. Results should be recorded in the owning doc's status section.
 | V6 | A parquet-checkpoint fixture **without** a `_last_checkpoint` schema hint exists/can be made, so the `read_parquet_footer` path is actually exercised | D1 |
 | V7 | wasm Range GETs via the fetch store against real endpoints; V2-checkpoint sidecar (`_delta_log/_sidecars/`) priming coverage. **Resolved (D4):** reqwest's fetch backend works under node (Range/206 verified against a local server; 200-with-full-body sliced locally); sidecar priming covered by native + wasm tests. Browser/CORS run deferred to D5 CI (server already sends CORS headers). | D4 ✅ |
 
-## Kernel-fork deltas (`../delta-kernel-rs` @ `wasm-kernel-compat`) — D5 must preserve
+## Kernel-fork deltas (`github.com/roeap/delta-kernel-rs` @ `wasm-kernel-compat`,
+pinned rev `530e94d241779dfc17eda242f554b24091e00d23`)
 
-Changes made to the kernel fork that delta-rs depends on. D5 reconciles these
-when moving path deps → git refs; each is a candidate for upstreaming.
+Changes made to the kernel fork that delta-rs depends on; each is a candidate
+for upstreaming. D5 reconciled these when moving path deps → git refs and
+reverted the one dead delta (`069115ff`, `ObjectStoreStorageHandler::new` made
+`pub`): after D1's DataFusion-plan handlers landed, nothing in delta-rs
+constructs that type anymore, so the visibility widening was unused.
 
 - **D4 — wasm-safe data-skipping timer** (`81b7cb95`).
   `kernel/src/scan/data_skipping.rs`: `DataSkippingFilter::apply` used

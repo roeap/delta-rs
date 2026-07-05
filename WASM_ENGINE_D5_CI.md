@@ -2,8 +2,13 @@
 
 > Part of the wasm-engine effort — read [`WASM_ENGINE.md`](./WASM_ENGINE.md) first.
 >
-> **Status: not started** · Depends on: D1–D4 landed · Blocks: mangrove Phase B
+> **Status: done — 2026-07-05** · Depends on: D1–D4 landed · Blocks: mangrove Phase B
 > pinning · Recommended model: **Sonnet**
+>
+> Pinned revs: `delta-rs` → `origin/wasm-core-compat` (roeap/delta-rs);
+> `delta-kernel-rs` → `origin/wasm-kernel-compat` @ `530e94d241779dfc17eda242f554b24091e00d23`
+> (roeap/delta-kernel-rs); `arrow-rs` → `origin/wasm-codec-58.3.0` @
+> `e76f4cfda8efc00f17d810d854cf6cb72412f1ab` (roeap/arrow-rs).
 
 ## Goal
 
@@ -75,3 +80,25 @@ parquet patch" (`../mangrove/WASM_QUERY_PREVIEW.md`, Phase A section).
 
 Fresh-clone gates green; mangrove unblocked with pinned revs; docs folded;
 `WASM_ENGINE.md` fully marked done.
+
+## Deviations from plan
+
+- Item 3's `069115ff` prune: confirmed unused via workspace grep (no
+  `ObjectStoreStorageHandler` references outside the kernel fork itself), then
+  reverted with `git revert` (not a rebase-drop) to keep `wasm-kernel-compat`'s
+  history linear/auditable — the branch was about to be pushed publicly.
+- CI matrix landed as a new standalone workflow, `.github/workflows/wasm.yml`,
+  rather than folded into `build.yml`, so the wasm gates can be read/triaged
+  independently of the native matrix. Two jobs: `check` (the three compile
+  gates) and `smoke` (`wasm-pack test --node`, per D4's suite). A `--headless
+  --chrome` browser job was **not** added — deferred, matching D4's V7
+  resolution that the browser/CORS run is out of scope until a real browser
+  target is needed; `--node` already exercises the full smoke suite including
+  the fetch-store HTTP path.
+- `[patch.crates-io]` git-ref entries add an explicit `package = "..."` key
+  (Cargo requires it once the dependency name and package name are pinned via
+  a multi-package git repo with a rev) — a mechanical necessity, not a design
+  change.
+- Mangrove's `WASM_QUERY_PREVIEW.md` Phase A section was updated directly
+  (item 6) rather than just handed to the owner, since both repos are local
+  sibling checkouts in this session.

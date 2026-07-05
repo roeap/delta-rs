@@ -1,8 +1,9 @@
 # WebAssembly (`wasm32-unknown-unknown`) support — status
 
-This is an in-progress spike to make `deltalake-core` build and (eventually) run
-on `wasm32-unknown-unknown` (browser / no-OS wasm), targeting a read-only
-DataFusion `TableProvider` for querying Delta tables from a wasm host.
+`deltalake-core` builds and runs on `wasm32-unknown-unknown` (browser / no-OS
+wasm): a read-only DataFusion `TableProvider` for querying Delta tables from a
+wasm host, via the `deltalake-wasm` facade crate. CI-gated on
+`.github/workflows/wasm.yml`.
 
 ## Current status
 
@@ -19,8 +20,9 @@ DataFusion `TableProvider` for querying Delta tables from a wasm host.
 - `logstore::get_engine` remains an `unimplemented!()` stub on wasm by design —
   the facade enters via `Snapshot::try_new_with_engine` and never constructs a
   `LogStore`.
-- `nanosecond-timestamps` is **disabled in the Python crate's default features** for the
-  spike (`python/Cargo.toml`). The feature is backed by kernel symbols
+- `nanosecond-timestamps` is **disabled in the Python crate's default features**
+  (`python/Cargo.toml`), pending kernel-pin reconciliation. The feature is backed
+  by kernel symbols
   (`PrimitiveType::TimestampNanos`, `Scalar::TimestampNanos`, `TableFeature::TimestampNanos`,
   `DataType::TIMESTAMP_NANOS`) that live only in the buoyant-data kernel fork, not the
   pinned upstream `delta_kernel` v0.25.0. The delta-rs gating is complete and correct; the
@@ -56,16 +58,17 @@ The wasm-bindgen surface (`WasmDeltaTable`: `open` / `query` / `schemaJson` /
 rustdoc). Host snapshot/scan work in a Web Worker: the inline-executor bursts
 are synchronous. Details and deviations: `WASM_ENGINE_D4_FACADE.md`.
 
-## Dependency wiring (spike-only)
+## Dependency wiring
 
-The build currently depends on local checkouts via path/patch in the workspace
-`Cargo.toml`. These are stopgaps for the spike; CI would use git refs instead.
+The build depends on two forks, pinned by git rev in the workspace `Cargo.toml`
+(no path deps — a fresh clone with no sibling repos builds).
 
-- `delta_kernel` → local `../delta-kernel-rs` (branch `wasm-kernel-compat`, v0.25.0).
-- `delta_kernel_default_engine` → local `../delta-kernel-rs/default-engine`
+- `delta_kernel` → `github.com/roeap/delta-kernel-rs` (branch `wasm-kernel-compat`,
+  v0.25.0, pinned rev).
+- `delta_kernel_default_engine` → same fork/rev, `default-engine` package
   (native-only; the tokio-based default engine).
-- `[patch.crates-io]` for `parquet` + the `arrow-*` family → local `../arrow-rs`
-  (branch `wasm-codec-58.3.0`). The patch changes parquet's default features
+- `[patch.crates-io]` for `parquet` + the `arrow-*` family → `github.com/roeap/arrow-rs`
+  (branch `wasm-codec-58.3.0`, pinned rev). The patch changes parquet's default features
   to drop the C-backed `zstd`/`brotli` codecs, which cannot build for wasm. This
   must be a patch/fork: `datafusion-datasource-parquet` and the kernel declare
   `parquet` without `default-features = false`, and Cargo unions features
@@ -76,6 +79,9 @@ The build currently depends on local checkouts via path/patch in the workspace
 - `.cargo/config.toml` sets `getrandom_backend="wasm_js"` for the wasm target
   (getrandom 0.3). getrandom 0.4 uses a crate feature instead — see
   `crates/core/Cargo.toml`.
+- Both forks' pinned revs and the kernel-fork deltas they carry are tracked in
+  [`WASM_ENGINE.md`](./WASM_ENGINE.md) ("Kernel-fork deltas" section); rev bumps
+  go through that doc.
 
 ## What builds on wasm vs. what is native-only
 
@@ -92,13 +98,13 @@ these are `cfg`-gated to `cfg(not(all(target_arch = "wasm32", target_os = "unkno
 - The tokio-based kernel `DefaultEngine`. On wasm the host must supply its own
   `Engine`.
 
-## Also required for the spike (not in this repo)
+## Also required (not in this repo)
 
 - `delta-kernel-rs` (`wasm-kernel-compat`): `kernel/Cargo.toml` makes the
-  `object_store` cloud features (which pull `ring`/`hyper`) native-only. Also
-  `default-engine/src/filesystem.rs`: `ObjectStoreStorageHandler::new` is made `pub`
-  (was `pub(crate)` after the v0.25.0 relocation) so delta-rs's DataFusion engine can
-  construct it directly, as it did pre-relocation.
+  `object_store` cloud features (which pull `ring`/`hyper`) native-only, plus
+  the wasm-safe data-skipping timer and opaque-predicate-adaptor visibility
+  deltas D3/D4 needed — see `WASM_ENGINE.md`'s "Kernel-fork deltas" section for
+  the full, current list.
 - `arrow-rs` (`wasm-codec-58.3.0`): the parquet codec-defaults change and the
   arrow-ipc zstd target-gating above.
 

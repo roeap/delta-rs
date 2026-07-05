@@ -62,24 +62,18 @@ wasm. Committed across three repos on branches (not pushed):
 
 ## Next steps
 
-> **Superseded:** the items below have been planned in full — see
+> **Done.** The items below were planned and executed in full — see
 > [`WASM_ENGINE.md`](./WASM_ENGINE.md) for the decided architecture (single
 > `DataFusionEngine` for native+wasm, executor seam, primed log store, opaque
-> predicate bridge) and the per-chunk handover docs `WASM_ENGINE_D1..D5`.
-> This list is kept for historical context.
+> predicate bridge), the per-chunk handover docs `WASM_ENGINE_D1..D5`, and the
+> commit refs each chunk landed on. This list is kept for historical context.
 
-1. **Detailed planning for the wasm `Engine`** (the crux). It must implement the
-   kernel `Engine` trait with: an arrow evaluation handler, a fetch-backed storage
-   handler, a JSON handler, a parquet handler using DataFusion's reader, and a
-   non-tokio (inline / `wasm-bindgen-futures`) executor. Decide: build it in
-   `deltalake-wasm`, or add a wasm executor + wasm build to
-   `delta_kernel_default_engine`.
-2. **`deltalake-wasm` facade crate**: the `TableProvider` + `DeltaScanExec`
-   equivalent (mostly portable arrow/DataFusion logic), DV fail-loud guard at the
-   `file.dv_info.has_vector()` check (`.../next/scan/replay.rs`).
-3. **Snapshot builder on wasm** from a fetch-backed `ObjectStore`, bypassing
-   `get_engine`.
-4. **`wasm-bindgen` harness** reading a `memory://`/`https://` table end-to-end —
-   proves it runs, not just compiles.
-5. **CI hygiene**: move local path/patch deps to git refs; land the parquet codec
-   change and kernel object_store gating upstream (or in stable forks).
+1. ~~Detailed planning for the wasm `Engine`~~ — `WASM_ENGINE.md` architecture +
+   decision log; D1–D3.
+2. ~~`deltalake-wasm` facade crate~~ — D4 (`crates/wasm`).
+3. ~~Snapshot builder on wasm~~ — D4 (`Snapshot::try_new_with_engine`, bypassing
+   `get_engine`).
+4. ~~`wasm-bindgen` harness~~ — D4 (`WasmDeltaTable`; `wasm-pack test --node`
+   smoke suite).
+5. ~~CI hygiene~~ — D5: path/patch deps now pinned git refs; obsolete kernel-fork
+   delta reverted; wasm CI matrix added (`.github/workflows/wasm.yml`).
