@@ -11,27 +11,27 @@ use object_store::path::Path;
 use object_store::{DynObjectStore, ObjectStore as _, ObjectStoreExt as _, PutMode};
 use url::Url;
 
-use crate::delta_datafusion::engine::{TracedHandle, UrlExt as _};
+use crate::delta_datafusion::engine::{ExecutorHandle, UrlExt as _};
 
 /// Kernel [`StorageHandler`] backed directly by the DataFusion session's `object_store`
 /// registry.
 ///
 /// Metadata IO for the `_delta_log` (listing, commit JSON / checkpoint reads, atomic
 /// commits) is issued as async `object_store` operations and bridged to the synchronous
-/// kernel trait via [`TracedHandle`].
+/// kernel trait via [`ExecutorHandle`].
 #[derive(Debug, Clone)]
 pub struct DataFusionStorageHandler {
     /// Object store registry shared with the datafusion session.
     ctx: Arc<TaskContext>,
     /// The executor used to drive async object-store IO from the sync kernel traits.
-    task_executor: TracedHandle,
+    task_executor: ExecutorHandle,
     /// Maximum number of files to read concurrently in `read_files`.
     readahead: usize,
 }
 
 impl DataFusionStorageHandler {
     /// Create a new [`DataFusionStorageHandler`] instance.
-    pub(crate) fn new(ctx: Arc<TaskContext>, task_executor: TracedHandle) -> Self {
+    pub(crate) fn new(ctx: Arc<TaskContext>, task_executor: ExecutorHandle) -> Self {
         Self {
             ctx,
             task_executor,
@@ -124,20 +124,26 @@ async fn read_files_impl(
             // https://docs.rs/url/latest/url/struct.Url.html#method.to_file_path has more
             // details about why this check is necessary
             let path = if url.scheme() == "file" {
-                let file_path = url
-                    .to_file_path()
-                    .map_err(|_| Error::InvalidTableLocation(format!("Invalid file URL: {url}")))?;
-                Path::from_absolute_path(file_path)
-                    .map_err(|e| Error::InvalidTableLocation(format!("Invalid file path: {e}")))?
+                #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+                {
+                    let file_path = url.to_file_path().map_err(|_| {
+                        Error::InvalidTableLocation(format!("Invalid file URL: {url}"))
+                    })?;
+                    Path::from_absolute_path(file_path).map_err(|e| {
+                        Error::InvalidTableLocation(format!("Invalid file path: {e}"))
+                    })?
+                }
+                // The url crate has no filesystem-path conversions on wasm — and there is
+                // no local filesystem to read from.
+                #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+                return Err(Error::InvalidTableLocation(format!(
+                    "file:// URLs are not supported on wasm: {url}"
+                )));
             } else {
                 Path::from(url.path())
             };
             if url.is_presigned() {
-                // Map reqwest errors explicitly rather than relying on the kernel's gated
-                // `Error::Reqwest` `From` impl. have to annotate type here or rustc can't
-                // figure it out.
-                let resp = reqwest::get(url).await.map_err(Error::generic_err)?;
-                Ok::<bytes::Bytes, Error>(resp.bytes().await.map_err(Error::generic_err)?)
+                fetch_presigned(url).await
             } else if let Some(rng) = range {
                 Ok(store.get_range(&path, rng).await?)
             } else {
@@ -150,6 +156,26 @@ async fn read_files_impl(
     // We allow executing up to `readahead` futures concurrently and
     // buffer the results. This allows us to achieve async concurrency.
     Ok(Box::pin(files.buffered(readahead)))
+}
+
+/// Fetch a presigned URL directly over HTTP, bypassing the object-store registry.
+///
+/// Maps reqwest errors explicitly rather than relying on the kernel's gated
+/// `Error::Reqwest` `From` impl.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+async fn fetch_presigned(url: Url) -> DeltaResult<Bytes> {
+    let resp = reqwest::get(url).await.map_err(Error::generic_err)?;
+    resp.bytes().await.map_err(Error::generic_err)
+}
+
+/// On wasm, reqwest wraps browser `fetch` in `!Send` JS types, which cannot cross the
+/// engine's `Send` iterator bounds. Presigned-URL bypass is unsupported there (v1);
+/// reads must go through an object store registered for the URL's host.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+async fn fetch_presigned(url: Url) -> DeltaResult<Bytes> {
+    Err(Error::Generic(format!(
+        "direct presigned-URL fetch is not supported on wasm (v1): {url}"
+    )))
 }
 
 /// Native async implementation for copy_atomic
@@ -211,8 +237,8 @@ impl StorageHandler for DataFusionStorageHandler {
         path: &Url,
     ) -> DeltaResult<Box<dyn Iterator<Item = DeltaResult<FileMeta>>>> {
         // Open an mlflow-annotated span so this kernel→engine callback nests under the
-        // originating scan/operation trace. `TracedHandle::block_on` re-enters this span
-        // inside the async IO driven on the runtime.
+        // originating scan/operation trace. The Tokio executor's `block_on` re-enters this
+        // span inside the async IO driven on the runtime.
         let span = tracing::debug_span!(
             "engine::list_from",
             prefix = %path,
@@ -287,7 +313,7 @@ impl StorageHandler for DataFusionStorageHandler {
         let dest_path = Path::from_url_path(dest.path())?;
         let future = copy_atomic_impl(store, src_path, dest_path);
 
-        self.task_executor.block_on(future)
+        self.task_executor.try_block_on(future)?
     }
 
     fn put(&self, path: &Url, data: Bytes, overwrite: bool) -> DeltaResult<()> {
@@ -309,7 +335,7 @@ impl StorageHandler for DataFusionStorageHandler {
 
         let object_path = Path::from_url_path(path.path())?;
         let future = put_impl(store, object_path, data, overwrite);
-        self.task_executor.block_on(future)
+        self.task_executor.try_block_on(future)?
     }
 
     fn head(&self, path: &Url) -> DeltaResult<FileMeta> {
@@ -329,7 +355,7 @@ impl StorageHandler for DataFusionStorageHandler {
 
         let future = head_impl(store, path.clone());
 
-        self.task_executor.block_on(future)
+        self.task_executor.try_block_on(future)?
     }
 }
 
@@ -394,7 +420,7 @@ mod tests {
         let session = SessionContext::new();
         let ctx = session.task_ctx();
 
-        DataFusionStorageHandler::new(ctx, TracedHandle::from(handle))
+        DataFusionStorageHandler::new(ctx, handle.into())
     }
 
     pub fn delta_path_for_version(version: u64, suffix: &str) -> Path {

@@ -34,18 +34,18 @@ use parquet::arrow::async_reader::ParquetObjectReader;
 use url::Url;
 
 use crate::delta_datafusion::engine::{
-    AsObjectStoreUrl as _, BlockingStreamIterator, TracedHandle, UrlExt as _, predicate_to_df,
+    AsObjectStoreUrl as _, BlockingStreamIterator, ExecutorHandle, UrlExt as _, predicate_to_df,
 };
 
 #[derive(Debug, Clone)]
 pub struct DataFusionFileFormatHandler {
-    handle: TracedHandle,
+    handle: ExecutorHandle,
     ctx: Arc<TaskContext>,
 }
 
 impl DataFusionFileFormatHandler {
     /// Create a new [`DataFusionFileFormatHandler`] instance.
-    pub fn new(ctx: Arc<TaskContext>, handle: TracedHandle) -> Self {
+    pub fn new(ctx: Arc<TaskContext>, handle: ExecutorHandle) -> Self {
         Self { handle, ctx }
     }
 }
@@ -118,10 +118,9 @@ impl ParquetHandler for DataFusionFileFormatHandler {
         // `pub(crate)` in the kernel, so inline it here).
         let reader_options = ArrowReaderOptions::new().with_skip_arrow_metadata(true);
 
-        let metadata = self.handle.block_on(async move {
+        let metadata = self.handle.try_block_on(async move {
             if location.is_presigned() {
-                let resp = reqwest::get(location).await.map_err(Error::generic_err)?;
-                let bytes = resp.bytes().await.map_err(Error::generic_err)?;
+                let bytes = fetch_presigned_footer_bytes(location).await?;
                 ArrowReaderMetadata::load(&bytes, reader_options).map_err(Error::from)
             } else {
                 let path = Path::from_url_path(location.path())?;
@@ -130,7 +129,7 @@ impl ParquetHandler for DataFusionFileFormatHandler {
                     .await
                     .map_err(Error::from)
             }
-        })?;
+        })??;
 
         let schema = StructType::try_from_arrow(metadata.schema().as_ref())
             .map(Arc::new)
@@ -224,7 +223,9 @@ impl JsonHandler for DataFusionFileFormatHandler {
         let path = Path::from_url_path(path.path())?;
         let path_str = path.to_string();
         self.handle
-            .block_on(async move { store.put_opts(&path, buffer.into(), put_mode.into()).await })
+            .try_block_on(
+                async move { store.put_opts(&path, buffer.into(), put_mode.into()).await },
+            )?
             .map_err(|e| match e {
                 object_store::Error::AlreadyExists { .. } => Error::FileAlreadyExists(path_str),
                 e => e.into(),
@@ -234,10 +235,26 @@ impl JsonHandler for DataFusionFileFormatHandler {
     }
 }
 
+/// Fetch a presigned parquet file over HTTP to read its footer, bypassing the registry.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+async fn fetch_presigned_footer_bytes(location: Url) -> DeltaResult<bytes::Bytes> {
+    let resp = reqwest::get(location).await.map_err(Error::generic_err)?;
+    resp.bytes().await.map_err(Error::generic_err)
+}
+
+/// On wasm, reqwest wraps browser `fetch` in `!Send` JS types, which cannot cross the
+/// engine's `Send` bounds. Presigned-URL bypass is unsupported there (v1).
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+async fn fetch_presigned_footer_bytes(location: Url) -> DeltaResult<bytes::Bytes> {
+    Err(Error::Generic(format!(
+        "direct presigned-URL fetch is not supported on wasm (v1): {location}"
+    )))
+}
+
 fn execute_iter(
     exec: Arc<dyn ExecutionPlan>,
     ctx: Arc<TaskContext>,
-    task_executor: TracedHandle,
+    task_executor: ExecutorHandle,
 ) -> DeltaResult<FileDataReadResultIterator> {
     let stream = execute_stream(exec, ctx)
         .map_err(Error::generic_err)?
@@ -246,7 +263,7 @@ fn execute_iter(
 
     Ok(Box::new(BlockingStreamIterator {
         stream: Some(Box::pin(stream)),
-        handle: task_executor,
+        executor: task_executor,
     }))
 }
 

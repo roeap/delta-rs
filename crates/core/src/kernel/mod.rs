@@ -10,6 +10,8 @@ use tracing::dispatcher;
 
 pub mod arrow;
 pub mod error;
+/// Target-portable executor bridging kernel sync handler traits to async IO.
+pub mod executor;
 /// Core Delta log action models (Add, Remove, Metadata, Protocol, ...) and related types.
 pub mod models;
 pub mod scalars;
@@ -22,6 +24,7 @@ pub use arrow::engine_ext::StructDataExt;
 pub use delta_kernel::Version;
 pub use delta_kernel::engine;
 pub use error::*;
+pub use executor::{ExecutorHandle, InlineExecutor, TracedHandle};
 pub use models::*;
 pub use schema::*;
 pub use snapshot::*;
@@ -58,6 +61,27 @@ where
     R: Send + 'static,
 {
     spawn_blocking_in_span(Span::current(), f)
+}
+
+/// Run `f` under `span`, off the async caller: natively on Tokio's blocking pool (via
+/// [`spawn_blocking_in_span`], with join errors mapped once here), on wasm inline on the
+/// calling task — there is no blocking pool, and kernel work against a primed store
+/// completes without blocking.
+pub(crate) async fn run_blocking_in_span<F, R>(span: Span, f: F) -> crate::DeltaResult<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        spawn_blocking_in_span(span, f)
+            .await
+            .map_err(|e| crate::DeltaTableError::Generic(e.to_string()))
+    }
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        Ok(span.in_scope(f))
+    }
 }
 
 /// Helpers for emitting OpenTelemetry span attributes that MLflow's trace UI
