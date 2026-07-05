@@ -433,3 +433,102 @@ async fn test_unprimed_sidecar_read_fails_loud() -> TestResult {
     );
     Ok(())
 }
+
+/// The committed zstd fixture is a valid table: natively (zstd codec present) it opens
+/// and queries fine. The wasm smoke test asserts the same query errors gracefully there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_zstd_fixture_queryable_natively() -> TestResult {
+    let store = Arc::new(InMemory::new());
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/zstd-table");
+    for entry in [
+        "_delta_log/00000000000000000000.json",
+        "part-00000-zstd.parquet",
+    ] {
+        let bytes = std::fs::read(dir.join(entry))?;
+        let key = Path::from(format!("{TABLE_PREFIX}/{entry}"));
+        store.put(&key, Bytes::from(bytes).into()).await?;
+    }
+
+    let opened =
+        open_table_with_store(store, &table_url(), LogSource::List, inline_options()).await?;
+    register_snapshot(&opened.ctx, opened.snapshot.clone())?;
+    let batches = opened
+        .ctx
+        .sql(&format!("SELECT sum(value) FROM {TABLE_NAME}"))
+        .await?
+        .collect()
+        .await?;
+    let total: i64 =
+        arrow::util::display::array_value_to_string(batches[0].column(0), 0)?.parse()?;
+    assert_eq!(total, (0..32).sum::<i64>());
+    Ok(())
+}
+
+/// Regenerate the committed `tests/data/zstd-table` fixture: a single-commit table whose
+/// data file uses zstd-compressed parquet pages. The wasm build drops the zstd codec, so
+/// the wasm smoke test asserts querying this table errors gracefully instead of panicking.
+///
+/// Run manually after fixture-affecting changes:
+/// `cargo test -p deltalake-wasm --test native generate_zstd_fixture -- --ignored`
+#[tokio::test]
+#[ignore = "fixture generator, run manually"]
+async fn generate_zstd_fixture() -> TestResult {
+    use arrow_array::Int64Array;
+    use parquet::arrow::ArrowWriter;
+    use parquet::basic::{Compression, ZstdLevel};
+    use parquet::file::properties::WriterProperties;
+
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/zstd-table");
+    std::fs::create_dir_all(root.join("_delta_log"))?;
+
+    let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+        arrow::datatypes::Field::new("value", arrow::datatypes::DataType::Int64, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(Int64Array::from_iter_values(0..32))],
+    )?;
+    let props = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(ZstdLevel::default()))
+        .build();
+    let mut buffer = Vec::new();
+    let mut writer = ArrowWriter::try_new(&mut buffer, schema, Some(props))?;
+    writer.write(&batch)?;
+    writer.close()?;
+
+    let data_file = "part-00000-zstd.parquet";
+    let size = buffer.len();
+    std::fs::write(root.join(data_file), &buffer)?;
+
+    let schema_string = serde_json::json!({
+        "type": "struct",
+        "fields": [{"name": "value", "type": "long", "nullable": true, "metadata": {}}]
+    })
+    .to_string();
+    let commit = [
+        serde_json::json!({"protocol": {"minReaderVersion": 1, "minWriterVersion": 2}}),
+        serde_json::json!({"metaData": {
+            "id": "8f5f34c1-42ba-4f7a-8de4-8f4bbcc42d00",
+            "format": {"provider": "parquet", "options": {}},
+            "schemaString": schema_string,
+            "partitionColumns": [],
+            "configuration": {},
+            "createdTime": 1751500000000_u64,
+        }}),
+        serde_json::json!({"add": {
+            "path": data_file,
+            "partitionValues": {},
+            "size": size,
+            "modificationTime": 1751500000000_u64,
+            "dataChange": true,
+            "stats": "{\"numRecords\":32}",
+        }}),
+    ]
+    .map(|action| action.to_string())
+    .join("\n");
+    std::fs::write(
+        root.join("_delta_log/00000000000000000000.json"),
+        format!("{commit}\n"),
+    )?;
+    Ok(())
+}

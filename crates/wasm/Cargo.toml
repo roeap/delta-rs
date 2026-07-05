@@ -54,12 +54,15 @@ wasm-bindgen-futures = "0.4"
 [dev-dependencies]
 arrow = { workspace = true }
 arrow-array = { workspace = true }
+arrow-ipc = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 
 # tokio's multi-threaded runtime does not compile for wasm; the native tests are the
-# only ones that need it.
+# only ones that need it. parquet+zstd is native-only (the whole point of the zstd
+# fixture is that wasm builds *without* the codec) and used by the fixture generator.
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]
+parquet = { workspace = true, features = ["arrow", "zstd"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
