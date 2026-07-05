@@ -12,6 +12,7 @@ mod commit_info_format;
 mod datafusion_dat;
 mod datafusion_table_provider;
 mod file_selection_bench_bridge;
+mod inline_executor;
 mod integration;
 mod integration_checkpoint;
 mod integration_datafusion;
