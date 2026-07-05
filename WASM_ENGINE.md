@@ -101,7 +101,7 @@ D3 (opaque bridge, native)  ────┘
 
 | Doc | Scope | Depends on | Model | Status |
 |---|---|---|---|---|
-| [`WASM_ENGINE_D1_HANDLERS.md`](./WASM_ENGINE_D1_HANDLERS.md) | Merge `feat/more-df-engine` DF-plan handlers; implement `read_parquet_footer`; drop `delta_kernel_default_engine` from the DF path | — | **Opus** (3-way merge + behavior-parity risk vs default-engine readers) | not started |
+| [`WASM_ENGINE_D1_HANDLERS.md`](./WASM_ENGINE_D1_HANDLERS.md) | Merge `feat/more-df-engine` DF-plan handlers; implement `read_parquet_footer`; drop `delta_kernel_default_engine` from the DF path | — | **Opus** (3-way merge + behavior-parity risk vs default-engine readers) | **done — f7dadcae** |
 | [`WASM_ENGINE_D2_EXECUTOR.md`](./WASM_ENGINE_D2_EXECUTOR.md) | `ExecutorHandle`/`InlineExecutor`; neutralize tokio bridges; first wasm compile of the `datafusion` feature | — (rebases on D1's constructor if D1 lands first) | **Fable** (highest uncertainty: cfg surgery, waker/poll semantics) | not started |
 | [`WASM_ENGINE_D3_OPAQUE.md`](./WASM_ENGINE_D3_OPAQUE.md) | `DataFusionOpaquePredicateOp`; wire `to_kernel`/`to_datafusion` catch-alls; pruning tests | — | **Opus** (correctness-sensitive seam, well-scoped after V5 spike) | not started |
 | [`WASM_ENGINE_D4_FACADE.md`](./WASM_ENGINE_D4_FACADE.md) | `deltalake-wasm` crate: fetch store, `PrimedStore`, snapshot/query API, wasm-bindgen, smoke tests | D1 + D2 | **Fable** (new crate, wasm tooling unknowns, e2e) | not started |

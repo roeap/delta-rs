@@ -2,7 +2,7 @@
 
 > Part of the wasm-engine effort — read [`WASM_ENGINE.md`](./WASM_ENGINE.md) first.
 >
-> **Status: not started** · Depends on: — · Blocks: D4 (and D2 rebases its
+> **Status: done — f7dadcae** · Depends on: — · Blocks: D4 (and D2 rebases its
 > constructor change on this) · Parallel with: D2, D3 · Recommended model: **Opus**
 
 ## Goal
@@ -178,3 +178,68 @@ Kernel trait/contract facts (local `../delta-kernel-rs`, `wasm-kernel-compat`):
 All validation gates green on `wasm-core-compat`; `delta_kernel_default_engine`
 no longer imported anywhere under `crates/core/src/delta_datafusion/`; status
 updated in `WASM_ENGINE.md`.
+
+## Outcome & deviations (for D2 / D4)
+
+Landed as merge commit **f7dadcae** (parents: `wasm-core-compat`,
+`feat/more-df-engine`). Done as a *reconciliation rewrite* of the three engine
+files, not a clean merge — the feat branch predated both the kernel v0.25.0
+`StorageHandler::put` addition and DataFusion 54's datasource API.
+
+Deviations from the doc's assumptions that dependent chunks must know:
+
+- **DataFusion 54 datasource API.** The feat-branch bodies were written against
+  an older API. Current shape (mirror this in D2/D4): file sources carry a
+  `TableSchema` (`ParquetSource::new(TableSchema::from(schema))
+  .with_table_parquet_options(..)`, `JsonSource::new(TableSchema::from(schema))`);
+  `FileScanConfigBuilder::new(store_url, Arc::new(source))` is **2-arg** (no
+  schema); use `.with_file_groups(vec![group])`. Schema reconciliation is via
+  `.with_expr_adapter(Some(Arc::new(DefaultPhysicalExprAdapterFactory)))` —
+  `SchemaAdapterFactory` is removed/deprecated in 54.
+- **Read schemas are relaxed to nullable** before handing to the scan
+  (`relax_nullability` in `file_formats.rs`; map `entries`/`key` kept
+  non-nullable per the Arrow invariant). Without this the parquet scan's strict
+  logical→physical cast rejects checkpoints whose `protocol` struct fields are
+  stored nullable. This matches the default engine, which never enforced
+  non-nullability on read (`apply_schema_to_struct` reconciles afterwards).
+  D4: if a primed store returns data that still trips a cast, this helper is the
+  place to look.
+- **`StorageHandler::put` is now implemented** (kernel v0.25.0 added it to the
+  trait) via direct `object_store::put_opts`; feat branch had no `put`.
+- **reqwest bumped 0.12 → 0.13** in `crates/core/Cargo.toml` to match the
+  version `delta_kernel` links. Presigned-URL errors are mapped with
+  `Error::generic_err` rather than relying on the kernel's gated
+  `Error::Reqwest` `From` impl.
+- **Executor type is still `TracedHandle`** (constructor:
+  `DataFusionEngine::new(ctx, impl Into<TracedHandle>)`). D2 replaces this with
+  `ExecutorHandle`; `TracedHandle::block_on` and the `stream_future_to_iter` /
+  `BlockingStreamIterator` primitives (now `pub(crate)` in `engine/mod.rs`) are
+  the single sync-bridge seam D2 genericizes. `UrlExt::is_presigned` also lives
+  in `engine/mod.rs` now.
+- **Sync-from-async test caveat (for D2's InlineExecutor tests):** driving a
+  sync handler that calls `block_on` from *within* a running runtime panics
+  ("Cannot start a runtime from within a runtime"). The storage unit tests run
+  the handler calls under `tokio::task::spawn_blocking` on a `multi_thread`
+  runtime. D2's `InlineExecutor` avoids this class of problem on wasm, but
+  native tests exercising `TracedHandle` must keep the `spawn_blocking` pattern.
+
+### Validation results
+
+- V6 (footer via missing `_last_checkpoint`): green — new test
+  `test_read_parquet_footer_via_no_last_checkpoint` builds a snapshot of
+  `crates/test/tests/data/with_checkpoint_no_last_checkpoint` (an existing
+  fixture with a checkpoint parquet and no `_last_checkpoint`), forcing kernel
+  log replay through `read_parquet_footer`.
+- Predicate pushdown, non-directory `list_from` offset, multi-file ordering:
+  green.
+- `cargo test -p deltalake-core --features datafusion --test it_datafusion`:
+  121 passed; **the 20 `command_optimize::*` failures are pre-existing** —
+  they panic with "Disabled feature at compile time: zstd" from the branch's
+  pinned parquet fork that drops zstd/brotli (commit `fd3d1ba3`), unrelated to
+  D1 (write path, not the engine read path this chunk touches).
+- `cargo build --workspace` green; fmt/clippy clean on the D1 files (remaining
+  fmt/clippy warnings are in unrelated pre-existing files on the branch).
+
+> Note: work landed on branch `wasm-engine-d1-handlers` (off `wasm-core-compat`)
+> per the invoking session; fast-forward/merge into `wasm-core-compat` when
+> integrating.
