@@ -35,7 +35,7 @@ use tracing::debug;
 
 use crate::delta_datafusion::DeltaScanConfig;
 use crate::delta_datafusion::engine::{
-    to_datafusion_expr, to_delta_expression, to_delta_predicate,
+    to_datafusion_expr, to_delta_expression, to_delta_predicate, try_opaque_predicate,
 };
 use crate::delta_datafusion::table_provider::next::FILE_ID_COLUMN_DEFAULT;
 use crate::kernel::{Scan, Snapshot};
@@ -623,6 +623,56 @@ fn process_predicate<'a>(
         };
     }
 
+    // The structural conversion failed. Before considering an opaque fallback,
+    // reject filters that would be pushed down with the wrong data type from an
+    // overridden schema — the opaque op evaluates the DataFusion `Expr` verbatim
+    // against typed partition values, so a type mismatch is exactly as unsafe
+    // for an opaque push as for a structural one. This guard therefore runs
+    // *before* opaque wrapping (and before the partition-refs early return).
+    let has_override_type_mismatch = if let (Some(override_schema), Ok(table_schema)) = (
+        scan_config.schema.as_ref(),
+        delta_kernel::engine::arrow_conversion::TryIntoArrow::<Schema>::try_into_arrow(
+            config.physical_schema().as_ref(),
+        ),
+    ) {
+        expr.column_refs().iter().any(|c| {
+            if let (Ok(outer_field), Ok(table_field)) = (
+                table_schema.field_with_name(c.name.as_str()),
+                override_schema.field_with_name(&c.name),
+            ) {
+                outer_field.data_type() != table_field.data_type()
+            } else {
+                false
+            }
+        })
+    } else {
+        false
+    };
+    if has_override_type_mismatch {
+        return ProcessedPredicate {
+            pushdown: TableProviderFilterPushDown::Unsupported,
+            kernel_predicate: None,
+            parquet_predicate: None,
+        };
+    }
+
+    // Opaque fallback: an untranslatable but boolean, non-volatile predicate can
+    // still drive partition pruning by wrapping the original `Expr` as a kernel
+    // opaque predicate (evaluated conservatively — it never wrongly prunes).
+    // Keep it `Inexact` so DataFusion re-applies the filter post-scan. This path
+    // covers partition-referencing predicates too (which is where pruning helps
+    // most), so it precedes the partition-refs early return.
+    if let Some(opaque) = try_opaque_predicate(expr) {
+        return ProcessedPredicate {
+            pushdown: TableProviderFilterPushDown::Inexact,
+            kernel_predicate: Some(opaque),
+            // Opaque predicates reference table columns; do not push them to the
+            // parquet scan here (partition-only opaque predicates cannot bind to
+            // parquet, and mixed ones are handled by the structural path above).
+            parquet_predicate: None,
+        };
+    }
+
     // If there are any partition column references, we cannot
     // push down the predicate to parquet scan
     if any_partition_refs {
@@ -632,33 +682,6 @@ fn process_predicate<'a>(
             parquet_predicate: None,
         };
     }
-
-    // Reject filters that would be pushed down with wrong data type
-    // from an overridden schema
-    if let (Some(override_schema), Ok(table_schema)) = (
-        scan_config.schema.as_ref(),
-        delta_kernel::engine::arrow_conversion::TryIntoArrow::<Schema>::try_into_arrow(
-            config.physical_schema().as_ref(),
-        ),
-    ) {
-        let has_override_type_mismatch = expr.column_refs().iter().any(|c| {
-            if let (Ok(outer_field), Ok(table_field)) = (
-                table_schema.field_with_name(c.name.as_str()),
-                override_schema.field_with_name(&c.name),
-            ) {
-                outer_field.data_type() != table_field.data_type()
-            } else {
-                false
-            }
-        });
-        if has_override_type_mismatch {
-            return ProcessedPredicate {
-                pushdown: TableProviderFilterPushDown::Unsupported,
-                kernel_predicate: None,
-                parquet_predicate: None,
-            };
-        }
-    };
 
     ProcessedPredicate {
         pushdown: TableProviderFilterPushDown::Inexact,
@@ -1292,18 +1315,21 @@ mod tests {
     #[tokio::test]
     async fn test_dedicated_skipping_predicate_with_no_survivors_falls_back_to_full_scan()
     -> TestResult {
+        use datafusion::functions::expr_fn::random;
+
         let mut table = open_fs_path("../test/tests/data/delta-0.8.0-partitioned");
         table.load().await?;
 
         let snapshot = table.snapshot()?.snapshot().snapshot();
+        // A volatile predicate is neither structurally translatable nor eligible
+        // for opaque wrapping (volatile exprs must never prune), so no kernel
+        // term survives and the scan must fall back to reading all files.
         let scan_plan = KernelScanPlan::try_new(
             snapshot,
             None,
             &[],
             &DeltaScanConfig::default(),
-            Some(vec![
-                col("year").in_list(vec![lit(ScalarValue::Utf8(None))], false),
-            ]),
+            Some(vec![random().gt(lit(0.5))]),
         )?;
 
         assert!(scan_plan.scan.physical_predicate().is_none());

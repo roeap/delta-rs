@@ -890,6 +890,7 @@ mod tests {
             source::DataSource,
         },
         error::DataFusionError,
+        functions::expr_fn::starts_with,
         logical_expr::dml::InsertOp,
         physical_optimizer::pruning::PruningPredicate,
         physical_plan::{ExecutionPlanVisitor, collect_partitioned, visit_execution_plan},
@@ -1720,6 +1721,81 @@ mod tests {
             .await?
             .collect()
             .await?;
+        assert_batches_sorted_eq!(&expected, &batches);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_opaque_predicate_prunes_partitions() -> TestResult {
+        // A partitioned table with one file per partition value. The filter
+        // `starts_with(part, 'ab')` is untranslatable to a structural kernel
+        // predicate, so it rides through the opaque-predicate seam. Partition
+        // pruning must still drop the non-matching partitions, and results must
+        // equal the full-scan baseline.
+        let schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("id", ArrowDataType::Int64, true),
+            ArrowField::new("part", ArrowDataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3, 4])),
+                Arc::new(StringArray::from(vec!["aa", "ab", "abc", "xy"])),
+            ],
+        )?;
+        let table = crate::DeltaTable::new_in_memory()
+            .write(vec![batch])
+            .with_partition_columns(vec!["part"])
+            .with_save_mode(crate::protocol::SaveMode::Append)
+            .await?;
+
+        let provider = DeltaScan::new(
+            table.snapshot()?.snapshot().snapshot().clone(),
+            DeltaScanConfig::default(),
+        )?
+        .with_log_store(table.log_store());
+
+        let session = Arc::new(create_session().into_inner());
+        let state = session.state_ref().read().clone();
+
+        // Baseline: unfiltered scan touches all four partition files.
+        let unfiltered = provider.scan(&state, None, &[], None).await?;
+        let mut base_visitor = DeltaScanVisitor::default();
+        visit_execution_plan(unfiltered.as_ref(), &mut base_visitor)?;
+        assert_eq!(
+            base_visitor.num_scanned,
+            Some(4),
+            "expected all four partition files without a filter",
+        );
+
+        // Filtered: the opaque `starts_with` predicate prunes to the two
+        // partitions whose value starts with `ab` (`ab`, `abc`).
+        let filter = starts_with(col("part"), lit("ab"));
+        let filtered = provider.scan(&state, None, &[filter], None).await?;
+        let mut visitor = DeltaScanVisitor::default();
+        visit_execution_plan(filtered.as_ref(), &mut visitor)?;
+        assert_eq!(
+            visitor.num_scanned,
+            Some(2),
+            "opaque predicate should prune to the two matching partitions",
+        );
+
+        // Correctness: results equal the full-scan + filter baseline.
+        session.register_table("delta_table", Arc::new(provider))?;
+        let batches = session
+            .sql("SELECT id, part FROM delta_table WHERE starts_with(part, 'ab') ORDER BY id")
+            .await?
+            .collect()
+            .await?;
+        let expected = vec![
+            "+----+------+",
+            "| id | part |",
+            "+----+------+",
+            "| 2  | ab   |",
+            "| 3  | abc  |",
+            "+----+------+",
+        ];
         assert_batches_sorted_eq!(&expected, &batches);
 
         Ok(())
