@@ -1,0 +1,48 @@
+name: wasm
+
+on:
+  push:
+    branches: [main, "rust-v*"]
+  pull_request:
+    branches: [main, "rust-v*"]
+  merge_group:
+
+env:
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+
+jobs:
+  check:
+    name: Check (wasm32-unknown-unknown)
+    runs-on: ubuntu-latest
+    steps:
+      # v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: ./.github/actions/setup-builder
+      - run: rustup target add wasm32-unknown-unknown
+
+      - name: deltalake-core (no default features)
+        run: cargo check -p deltalake-core --no-default-features --lib --target wasm32-unknown-unknown
+
+      - name: deltalake-core (datafusion)
+        run: cargo check -p deltalake-core --no-default-features --features datafusion --target wasm32-unknown-unknown
+
+      - name: deltalake-wasm
+        # build, not just check: 32-bit usize overflows only surface at build time
+        run: cargo build -p deltalake-wasm --target wasm32-unknown-unknown
+
+  smoke:
+    name: Smoke tests (wasm-pack --node)
+    runs-on: ubuntu-latest
+    steps:
+      # v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: ./.github/actions/setup-builder
+      - run: rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@wasm-pack
+
+      - name: Run wasm-pack test --node
+        working-directory: crates/wasm
+        run: wasm-pack test --node
