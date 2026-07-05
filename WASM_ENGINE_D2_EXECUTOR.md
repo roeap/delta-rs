@@ -2,9 +2,8 @@
 
 > Part of the wasm-engine effort — read [`WASM_ENGINE.md`](./WASM_ENGINE.md) first.
 >
-> **Status: not started** · Depends on: — (rebase constructor changes on D1 if it
-> lands first; the files otherwise barely overlap) · Blocks: D4 · Parallel with:
-> D1, D3 · Recommended model: **Fable**
+> **Status: done — see "Outcome & deviations" below** · Depends on: — (rebased on
+> D1's `f7dadcae`) · Blocks: D4 · Parallel with: D1, D3 · Recommended model: **Fable**
 
 ## Goal
 
@@ -159,3 +158,85 @@ wasm32-unknown-unknown at our tokio pin; if not, cfg the field and its plumbing.
 Wasm check green with `--features datafusion`; V2 tests merged and green
 natively; DV fail-loud in place; status + any interface deviations recorded in
 `WASM_ENGINE.md`.
+
+## Outcome & deviations (for D4 / D5)
+
+All done criteria met: the wasm check passes with `--features datafusion` (zero
+warnings), the V2 keystone tests are merged and green natively
+(`crates/core/tests/it_datafusion/inline_executor.rs`), and the DV guard is in
+place. Deviations and findings dependent chunks must know:
+
+- **V1 was a dependency-graph problem, not a code problem.** Only 9 Rust errors
+  existed; the real blockers were C codecs:
+  - datafusion's default `compression` feature pulls `async-compression`
+    (liblzma/bzip2/zstd C code). Fixed in the workspace `Cargo.toml`:
+    `datafusion`/`datafusion-datasource` are declared `default-features = false`
+    (defaults minus `compression`), and `crates/core` re-adds `compression`
+    natively via a target-gated dependency entry — the native feature set is
+    unchanged.
+  - `datafusion-common` enables `arrow-ipc/zstd` unconditionally. Fixed in the
+    arrow-rs fork (`wasm-codec-58.3.0`): `arrow-ipc`'s zstd dependency is
+    target-gated, making the feature inert on wasm (graceful codec error).
+    **D5: the fork now carries two commits to preserve.**
+- **V4 answer: tokio 1.52 `sync`/`rt` types compile on wasm32-unknown-unknown**,
+  including `spawn_blocking` signatures — the crate compiles, spawning would
+  fail at runtime. Consequence: `ReceiverStreamBuilder` and the `dv_stream`
+  field stay compiled on wasm (nothing is cfg'd out); the wasm treatment is
+  *never calling* the spawn paths, enforced by the cfg'd call sites and the DV
+  fail-loud guard.
+- **`ExecutorHandle` variants are not cfg'd** (both `Tokio` and `Inline` compile
+  on every target; `tokio::runtime::Handle` exists on wasm). Only
+  `ExecutorHandle::current()` is target-dependent. This keeps the cfg surface
+  minimal and lets native tests force `InlineExecutor` per the design.
+- **wasm `scan_metadata` is eager, not a lazy `stream::iter`.** The kernel's
+  `Scan::scan_metadata(&dyn Engine)` iterator borrows the engine, so a
+  `'static` lazy stream would be self-referential. On wasm the iterator is
+  driven to completion under the span (fine against primed data; metadata
+  batches are small) and returned as an immediately-ready stream. Same for
+  `scan_metadata_from`.
+- **`BlockingStreamIterator` items are now `DeltaResult<T>`** (was generic `T`)
+  so an executor would-block failure is yielded as a final error item before
+  the iterator fuses.
+- **`TracedHandle` moved** from `delta_datafusion/engine/mod.rs` to
+  `crates/core/src/kernel/executor.rs` (with `ExecutorHandle`/`InlineExecutor`);
+  the old `delta_datafusion::engine::TracedHandle` path is preserved via
+  re-export. `run_blocking_in_span` lives in `kernel/mod.rs` next to the spawn
+  helpers and unifies join-error mapping (`DeltaTableError::Generic`).
+- **Presigned-URL direct fetch is cfg'd off on wasm** (fail loud): reqwest's
+  wasm backend wraps browser fetch in `!Send` JS types that cannot cross the
+  engine's `Send` iterator bounds. On wasm, presigned http(s) URLs must be
+  served by an object store registered for that host — **D4: the fetch store
+  owns all HTTP, including presigned URLs.**
+- Off-read-path `spawn_blocking_with_span` users (logstore commit reads,
+  checkpoints, log compaction, blind tables) still use the tokio blocking pool:
+  they compile on wasm but are not runtime-safe there and are unreachable from
+  the facade's snapshot/scan path.
+
+### Validation results
+
+- V1: `cargo check -p deltalake-core --no-default-features --features datafusion
+  --target wasm32-unknown-unknown` passes with zero warnings.
+- V2: `test_inline_executor_snapshot_scan_matches_tokio` (checkpointed fixture
+  `with_checkpoint_no_last_checkpoint`, exercising list/commit-JSON/checkpoint
+  parquet/footer under `InlineExecutor`, file list equal to the Tokio engine's)
+  and `test_inline_executor_errors_on_unprimed_data` (store lists a commit but
+  its read never resolves → "would block … not primed" error, no hang) — both
+  green. `InlineExecutor` poll-loop unit tests (ready/yield/would-block/wake-
+  loop budget) live in `kernel/executor.rs`.
+- V4: answered above (construct-only usage is fine; no cfg-out needed).
+
+### Pre-existing gate state (baseline, not D2 regressions)
+
+The branch's native gates were already degraded by the upstream-kernel pin /
+arrow-rs fork before D2; verified by re-running at the D2 branch point:
+
+- 24 `--lib` test failures from the fork dropping parquet's default
+  `zstd`/`brotli` (writer tests). **D2 fixes 21 of them** by opting back into
+  the codecs natively (`crates/core/Cargo.toml`, target-gated).
+- 3 remaining failures are kernel-pin behavior changes
+  (`test_{builder,direct_scan}_rejects_unsupported_reader_protocol`,
+  `test_builder_from_valid_url_local_existing_path`) — D5/fork-hygiene scope.
+- `clippy --all-features` cannot compile: `nanosecond-timestamps` needs the
+  buoyant-data kernel fork (see `WASM.md`). Without that feature, 4 clippy
+  lints pre-exist in untouched files (`actions.rs`, `stats_projection.rs`,
+  `write/execution.rs`, `protocol/mod.rs`). D2 adds none.

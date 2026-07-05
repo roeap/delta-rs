@@ -36,11 +36,14 @@ The build currently depends on local checkouts via path/patch in the workspace
 - `delta_kernel_default_engine` → local `../delta-kernel-rs/default-engine`
   (native-only; the tokio-based default engine).
 - `[patch.crates-io]` for `parquet` + the `arrow-*` family → local `../arrow-rs`
-  (branch `wasm-codec-58.3.0`). The patch only changes parquet's default features
+  (branch `wasm-codec-58.3.0`). The patch changes parquet's default features
   to drop the C-backed `zstd`/`brotli` codecs, which cannot build for wasm. This
   must be a patch/fork: `datafusion-datasource-parquet` and the kernel declare
   `parquet` without `default-features = false`, and Cargo unions features
   graph-wide, so no feature flag in delta-rs can turn `zstd` off.
+  Since D2 the fork also target-gates `arrow-ipc`'s `zstd` dependency:
+  `datafusion-common` enables `arrow-ipc/zstd` unconditionally, so on wasm the
+  feature is inert (IPC zstd (de)compression returns the codec's graceful error).
 - `.cargo/config.toml` sets `getrandom_backend="wasm_js"` for the wasm target
   (getrandom 0.3). getrandom 0.4 uses a crate feature instead — see
   `crates/core/Cargo.toml`.
@@ -67,7 +70,8 @@ these are `cfg`-gated to `cfg(not(all(target_arch = "wasm32", target_os = "unkno
   `default-engine/src/filesystem.rs`: `ObjectStoreStorageHandler::new` is made `pub`
   (was `pub(crate)` after the v0.25.0 relocation) so delta-rs's DataFusion engine can
   construct it directly, as it did pre-relocation.
-- `arrow-rs` (`wasm-codec-58.3.0`): the parquet codec-defaults change above.
+- `arrow-rs` (`wasm-codec-58.3.0`): the parquet codec-defaults change and the
+  arrow-ipc zstd target-gating above.
 
 Native code that referenced the pre-v0.25.0 `delta_kernel::engine::default::*` paths
 (`crates/core/src/delta_datafusion/engine/{file_formats,storage}.rs`) now imports the
