@@ -11,8 +11,8 @@ use ::object_store::RetryConfig;
 use object_store::{ObjectStore, path::Path, prefix::PrefixStore};
 use std::collections::HashMap;
 
-use super::storage::{CertificateConfig, LimitConfig};
 use super::storage::runtime::RuntimeConfig;
+use super::storage::{CertificateConfig, LimitConfig};
 // The dedicated IO runtime is native-only (tokio threads).
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use super::IORuntime;
