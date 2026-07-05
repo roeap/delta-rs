@@ -1,7 +1,7 @@
 //! Browser facade for delta-rs: read-only Delta table queries on `wasm32-unknown-unknown`.
 //!
 //! This crate wires deltalake-core's DataFusion-backed kernel engine into a browser
-//! runtime: a fetch-backed [`ObjectStore`] ([`FetchObjectStore`], wasm-only), the
+//! runtime: a fetch-backed [`ObjectStore`] (`FetchObjectStore`, wasm-only), the
 //! [`PrimedStore`] that prefetches the `_delta_log` tail so the synchronous kernel engine
 //! only ever awaits ready futures, and a small session/snapshot/query API that mangrove
 //! Phase B (or any host) builds on. A minimal `wasm-bindgen` surface (`WasmDeltaTable`)

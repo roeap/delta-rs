@@ -6,12 +6,19 @@ DataFusion `TableProvider` for querying Delta tables from a wasm host.
 
 ## Current status
 
-- `deltalake-core` **compiles** for `wasm32-unknown-unknown` (`--no-default-features`)
-  and the **whole native workspace** (`cargo build --workspace`, incl. `python`) builds
-  against the pinned upstream kernel.
-- It does **not run** on wasm yet: `logstore::get_engine` is an `unimplemented!()`
-  stub on wasm. A wasm-compatible kernel `Engine` and the `deltalake-wasm` facade
-  crate are the next step.
+- Delta tables are **queryable on wasm**: the `deltalake-wasm` facade crate
+  (`crates/wasm`) primes the `_delta_log` into memory, builds a kernel snapshot on
+  the inline executor, and runs read-only DataFusion SQL over the `next/`
+  `TableProvider`, streaming Arrow IPC out. Proven by `wasm-pack test --node`
+  (see "Running on wasm" below). v1 limits: read-only; no deletion vectors (loud
+  error); no zstd/brotli parquet pages (graceful error); fully-qualified URLs.
+- `deltalake-core` compiles for `wasm32-unknown-unknown` both with
+  `--no-default-features` and with `--features datafusion`, and the **whole native
+  workspace** (`cargo build --workspace`, incl. `python`) builds against the
+  pinned upstream kernel.
+- `logstore::get_engine` remains an `unimplemented!()` stub on wasm by design —
+  the facade enters via `Snapshot::try_new_with_engine` and never constructs a
+  `LogStore`.
 - `nanosecond-timestamps` is **disabled in the Python crate's default features** for the
   spike (`python/Cargo.toml`). The feature is backed by kernel symbols
   (`PrimitiveType::TimestampNanos`, `Scalar::TimestampNanos`, `TableFeature::TimestampNanos`,
@@ -26,6 +33,28 @@ Build it with:
 ```sh
 cargo build -p deltalake-core --no-default-features --lib --target wasm32-unknown-unknown
 ```
+
+## Running on wasm
+
+```sh
+# CI-style gate for the facade crate (build, not just check: 32-bit usize
+# overflows surface only at build time)
+cargo build -p deltalake-wasm --target wasm32-unknown-unknown
+
+# wasm smoke suite under node (embedded fixtures, no network)
+cd crates/wasm && wasm-pack test --node
+
+# optionally include the FetchObjectStore HTTP test (Range GETs against a
+# local range-capable server)
+node tests/http-server.mjs ../test/tests/data 8917 &
+WASM_SMOKE_HTTP_BASE=http://127.0.0.1:8917 wasm-pack test --node
+```
+
+The wasm-bindgen surface (`WasmDeltaTable`: `open` / `query` / `schemaJson` /
+`version`) is a proof harness; hosts build on the rlib API
+(`open_table_with_store`, `register_snapshot`, `query_ipc` — see the crate's
+rustdoc). Host snapshot/scan work in a Web Worker: the inline-executor bursts
+are synchronous. Details and deviations: `WASM_ENGINE_D4_FACADE.md`.
 
 ## Dependency wiring (spike-only)
 

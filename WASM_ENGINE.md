@@ -104,7 +104,7 @@ D3 (opaque bridge, native)  ────┘
 | [`WASM_ENGINE_D1_HANDLERS.md`](./WASM_ENGINE_D1_HANDLERS.md) | Merge `feat/more-df-engine` DF-plan handlers; implement `read_parquet_footer`; drop `delta_kernel_default_engine` from the DF path | — | **Opus** (3-way merge + behavior-parity risk vs default-engine readers) | **done — f7dadcae** |
 | [`WASM_ENGINE_D2_EXECUTOR.md`](./WASM_ENGINE_D2_EXECUTOR.md) | `ExecutorHandle`/`InlineExecutor`; neutralize tokio bridges; first wasm compile of the `datafusion` feature | — (rebases on D1's constructor if D1 lands first) | **Fable** (highest uncertainty: cfg surgery, waker/poll semantics) | **done — f1f11885…4822f96e (+ arrow-rs fork e76f4cfda); deviations in D2 doc** |
 | [`WASM_ENGINE_D3_OPAQUE.md`](./WASM_ENGINE_D3_OPAQUE.md) | `DataFusionOpaquePredicateOp`; wire `to_kernel`/`to_datafusion` catch-alls; pruning tests | — | **Opus** (correctness-sensitive seam, well-scoped after V5 spike) | **done — unsigned local; needs kernel-fork patch (see below); deviations in D3 doc** |
-| [`WASM_ENGINE_D4_FACADE.md`](./WASM_ENGINE_D4_FACADE.md) | `deltalake-wasm` crate: fetch store, `PrimedStore`, snapshot/query API, wasm-bindgen, smoke tests | D1 + D2 | **Fable** (new crate, wasm tooling unknowns, e2e) | not started |
+| [`WASM_ENGINE_D4_FACADE.md`](./WASM_ENGINE_D4_FACADE.md) | `deltalake-wasm` crate: fetch store, `PrimedStore`, snapshot/query API, wasm-bindgen, smoke tests | D1 + D2 | **Fable** (new crate, wasm tooling unknowns, e2e) | **done — unsigned local (9eb2c329…); needs kernel-fork patch 81b7cb95; deviations in D4 doc** |
 | [`WASM_ENGINE_D5_CI.md`](./WASM_ENGINE_D5_CI.md) | Path deps → git refs; revert obsolete fork deltas; CI matrix; fold docs | D1–D4 | **Sonnet** (mechanical) | not started |
 
 Model recommendations assume Claude Code sessions; they track implementation
@@ -119,17 +119,23 @@ doc. Results should be recorded in the owning doc's status section.
 |---|---|---|
 | V1 | `cargo check -p deltalake-core --no-default-features --features datafusion --target wasm32-unknown-unknown` — the `datafusion` feature has **never** been wasm-compiled; the error inventory defines D2's true scope | D2 (first action) |
 | V2 | Native test: snapshot build + `scan_metadata` against a fully-primed `InMemory` store using a forced `InlineExecutor` — proves "all handler futures are ready after priming" for `list_with_offset`, `head`, `DataSourceExec(JsonSource)`, `DataSourceExec(ParquetSource)`, `ArrowReaderMetadata::load_async` | D2 |
-| V3 | `DataSourceExec` *data* stream drivable on wasm without tokio (`target_partitions=1`; audit plans for `RepartitionExec`/spawned tasks) | D4 |
+| V3 | `DataSourceExec` *data* stream drivable on wasm without tokio (`target_partitions=1`; audit plans for `RepartitionExec`/spawned tasks). **Resolved (D4):** plans are single-partition with no repartition/merge operators (native assertion) and execute to completion on wasm under node (smoke suite). | D4 ✅ |
 | V4 | tokio `sync`-feature types (`mpsc::channel`, `JoinSet::new`) constructible on wasm32-unknown-unknown (decides cfg-out vs never-spawn for `ReceiverStreamBuilder`/`dv_stream`) | D2 |
 | V5 | Opaque-op downcast recovery for the `predicate_to_df` round-trip. **Resolved (D3):** took the kernel-fork patch — made `ArrowOpaquePredicateOpAdaptor` `pub` + added `pub fn op()`. Downcast recovery works (`v5_spike_downcast_round_trip`). See kernel-fork note below; D5 must keep this patch. | D3 ✅ |
 | V6 | A parquet-checkpoint fixture **without** a `_last_checkpoint` schema hint exists/can be made, so the `read_parquet_footer` path is actually exercised | D1 |
-| V7 | wasm Range GETs via the fetch store against real endpoints; V2-checkpoint sidecar (`_delta_log/_sidecars/`) priming coverage | D4 |
+| V7 | wasm Range GETs via the fetch store against real endpoints; V2-checkpoint sidecar (`_delta_log/_sidecars/`) priming coverage. **Resolved (D4):** reqwest's fetch backend works under node (Range/206 verified against a local server; 200-with-full-body sliced locally); sidecar priming covered by native + wasm tests. Browser/CORS run deferred to D5 CI (server already sends CORS headers). | D4 ✅ |
 
 ## Kernel-fork deltas (`../delta-kernel-rs` @ `wasm-kernel-compat`) — D5 must preserve
 
 Changes made to the kernel fork that delta-rs depends on. D5 reconciles these
 when moving path deps → git refs; each is a candidate for upstreaming.
 
+- **D4 — wasm-safe data-skipping timer** (`81b7cb95`).
+  `kernel/src/scan/data_skipping.rs`: `DataSkippingFilter::apply` used
+  `std::time::Instant` directly, which panics on wasm32-unknown-unknown; now
+  routed through the kernel's `crate::time` shim like every other metric timer.
+  Without it, any predicate-bearing scan traps at runtime on wasm. Clear
+  upstream candidate.
 - **D3 — expose the opaque predicate adaptor.**
   `kernel/src/engine/arrow_expression/opaque.rs`: `ArrowOpaquePredicateOpAdaptor`
   changed from `pub(crate)` to `pub`, plus a new `pub fn op(&self) -> &dyn
