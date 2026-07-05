@@ -62,6 +62,12 @@ wasm. Committed across three repos on branches (not pushed):
 
 ## Next steps
 
+> **Superseded:** the items below have been planned in full — see
+> [`WASM_ENGINE.md`](./WASM_ENGINE.md) for the decided architecture (single
+> `DataFusionEngine` for native+wasm, executor seam, primed log store, opaque
+> predicate bridge) and the per-chunk handover docs `WASM_ENGINE_D1..D5`.
+> This list is kept for historical context.
+
 1. **Detailed planning for the wasm `Engine`** (the crux). It must implement the
    kernel `Engine` trait with: an arrow evaluation handler, a fetch-backed storage
    handler, a JSON handler, a parquet handler using DataFusion's reader, and a

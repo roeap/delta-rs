@@ -75,5 +75,7 @@ relocated types from the `delta_kernel_default_engine` crate.
 
 ## Next steps
 
-See [`WASM_NOTES.md`](./WASM_NOTES.md) for the decisions, learnings, and detailed
-next steps (the wasm `Engine` design, the `deltalake-wasm` facade, and CI hygiene).
+The wasm `Engine` + `deltalake-wasm` work is planned in detail in
+[`WASM_ENGINE.md`](./WASM_ENGINE.md) (architecture, decision log, and five
+executable handover documents `WASM_ENGINE_D1..D5`). Spike-era decisions and
+learnings remain in [`WASM_NOTES.md`](./WASM_NOTES.md).
