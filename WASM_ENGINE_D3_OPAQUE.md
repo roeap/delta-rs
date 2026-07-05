@@ -2,8 +2,14 @@
 
 > Part of the wasm-engine effort — read [`WASM_ENGINE.md`](./WASM_ENGINE.md) first.
 >
-> **Status: not started** · Depends on: — · Blocks: nothing (independently
-> landable; D4 benefits) · Parallel with: D1, D2 · Recommended model: **Opus**
+> **Status: done (unsigned local, branch `wasm-engine-d2-executor`)** · Depends
+> on: — · Blocks: nothing (independently landable; D4 benefits) · Parallel with:
+> D1, D2 · Recommended model: **Opus**
+>
+> **Required a kernel-fork patch** (recorded in `WASM_ENGINE.md` → "Kernel-fork
+> deltas"): `ArrowOpaquePredicateOpAdaptor` made `pub` + `pub fn op()` accessor.
+> See "Deviations from the plan" below for two design corrections found during
+> implementation.
 
 ## Goal
 
@@ -177,7 +183,68 @@ Wiring:
   scalar evaluator (non-partition columns during partition pruning) — that path
   returns `None` from the column resolve, which is safe; test it explicitly.
 
-## Done criteria
+## Deviations from the plan (as implemented)
 
-Gates green; invariant documented; status in `WASM_ENGINE.md` updated, including
-V5 findings (especially if a kernel-fork patch was needed — D5 must know).
+Two design assumptions in the sections above were corrected during
+implementation. Both are load-bearing; a future reader should trust this section
+over the pre-implementation "Design" text where they conflict.
+
+1. **Partition pruning flows through `as_data_skipping_predicate`, not
+   `eval_pred_scalar`.** The plan (§Design) assumed `eval_pred_scalar` "powers
+   partition pruning". In kernel v0.25 the scan's partition pruning is done by
+   the `DataSkippingFilter`, which calls the *indirect* hook
+   `OpaquePredicateOp::as_data_skipping_predicate` (via
+   `DataSkippingPredicateCreator::eval_pred_opaque`,
+   `kernel/src/scan/data_skipping.rs`). An op that returns `None` there (as the
+   plan proposed for v1) contributes **nothing** to pruning — the integration
+   test proved 0 files pruned. `eval_pred_scalar` is only invoked for the static
+   `can_statically_skip_all_files` check (`kernel/src/scan/mod.rs`) with an
+   `EmptyColumnResolver`, so it can never see partition values.
+   **Resolution:** `as_data_skipping_predicate` now rewrites the op over the
+   exact partition-value stat columns. For each referenced column it asks the
+   evaluator for `get_min_stat`/`get_max_stat`; a partition column yields the
+   same `partitionValues_parsed.<col>` expression for both (min == max, exact),
+   while a data column yields distinct min/max (or `None`) — so **only partition
+   columns qualify** and the op never prunes on approximate stats. It re-wraps
+   itself as a fresh opaque predicate over those stat expressions; the kernel
+   guards the result against Remove rows and evaluates it columnarly via
+   `eval_pred`. The v1 stats-skipping-for-data-columns follow-up (map
+   monotone/range-safe exprs onto min/max) still stands.
+
+2. **The op evaluates by *arg-expression*, not by name lookup; opaque wrapping
+   is an explicit `process_predicate` fallback, not folded into
+   `to_delta_predicate`.**
+   - *Evaluation model:* because `eval_pred` runs against two different batch
+     shapes (raw data with a `part` column; a stats batch with a
+     `partitionValues_parsed.part` struct), the op does **not** plan
+     `logical2physical(self.expr, batch.schema())` directly. It stores the DF
+     `Expr` plus the ordered leaf column names, evaluates each embedded kernel
+     `Expression` against the batch (`evaluate_expression`, which resolves nested
+     paths), rebuilds a batch keyed by the DF column names, then runs the `Expr`.
+     This is the only shape that works for both callers.
+   - *Wiring placement:* the plan put opaque wrapping in `to_kernel.rs`'s
+     catch-all. That is unsafe: `to_delta_predicate` is also called by
+     `find_files` and by `process_predicate` *before* the schema-override
+     type-mismatch guard, so auto-wrapping there let a wrong-typed predicate
+     (override `Timestamp` over a `Long` column) reach the kernel and panic. The
+     structural `to_delta_predicate` is therefore left unchanged (untranslatable
+     ⇒ `Err`), and `try_opaque_predicate` is called **explicitly** in
+     `process_predicate` (`next/scan/plan.rs`) *after* the type-mismatch guard
+     and *before* the partition-refs early return. Opaque-carrying predicates are
+     always classified `Inexact` (DataFusion re-applies them).
+   - Consequence for the D1 round-trip: `predicate_to_df` recovers our op via
+     downcast and returns the original `Expr` (kept — `test_roundtrip_opaque_predicate`).
+
+## Done criteria — met
+
+- Gates green: `cargo test -p deltalake-core --features datafusion` passes
+  except three failures pre-existing on the base branch
+  (`test_builder_rejects_unsupported_reader_protocol`,
+  `test_direct_scan_rejects_unsupported_reader_protocol`,
+  `test_builder_from_valid_url_local_existing_path` — unrelated to predicates);
+  fmt + clippy clean for the new code.
+- Invariant documented in `opaque.rs` module docs.
+- V5 spike kept as regression (`v5_spike_downcast_round_trip`); partition-pruning
+  integration test (`test_opaque_predicate_prunes_partitions`) proves 4→2 file
+  pruning with results equal to the full-scan baseline.
+- `WASM_ENGINE.md` status + kernel-fork note updated (D5 must keep the patch).
