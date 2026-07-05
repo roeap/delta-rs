@@ -42,14 +42,16 @@ fn upload_part_size() -> usize {
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .map(|size| {
+                // Maximum part size in GCS and S3; kept in u64 because it exceeds
+                // usize::MAX on 32-bit targets (wasm32).
+                const MAX_UPLOAD_PART_SIZE: u64 = 1024 * 1024 * 1024 * 5;
                 if size < DEFAULT_UPLOAD_PART_SIZE {
                     // Minimum part size in GCS and S3
                     debug!("DELTARS_UPLOAD_PART_SIZE must be at least 5MB, therefore falling back on default of 5MB.");
                     DEFAULT_UPLOAD_PART_SIZE
-                } else if size > 1024 * 1024 * 1024 * 5 {
-                    // Maximum part size in GCS and S3
+                } else if size as u64 > MAX_UPLOAD_PART_SIZE {
                     debug!("DELTARS_UPLOAD_PART_SIZE must not be higher than 5GB, therefore capping it at 5GB.");
-                    1024 * 1024 * 1024 * 5
+                    usize::try_from(MAX_UPLOAD_PART_SIZE).unwrap_or(usize::MAX)
                 } else {
                     size
                 }
