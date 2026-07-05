@@ -258,10 +258,20 @@ async fn resolve_input_file_ids_on_blocking_pool(
 ) -> Result<HashSet<String>> {
     let selection = selection.clone();
     let table_root = table_root.clone();
-    tokio::task::spawn_blocking(move || selection.resolve_input_file_ids(&table_root))
-        .await
-        .map_err(|err| DataFusionError::External(Box::new(err)))?
-        .map_err(DataFusionError::from)
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        tokio::task::spawn_blocking(move || selection.resolve_input_file_ids(&table_root))
+            .await
+            .map_err(|err| DataFusionError::External(Box::new(err)))?
+            .map_err(DataFusionError::from)
+    }
+    // No blocking pool on wasm; the resolution is pure computation and runs inline.
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        selection
+            .resolve_input_file_ids(&table_root)
+            .map_err(DataFusionError::from)
+    }
 }
 
 async fn collect_selected_active_file_ids(

@@ -16,7 +16,9 @@ use url::Url;
 use super::MaterializedFiles;
 use super::stats_projection::{FileStatsMaterialization, StatsProjection, StatsSourcePolicy};
 use crate::DeltaResult;
-use crate::kernel::{ReceiverStreamBuilder, scan_row_in_eval};
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+use crate::kernel::ReceiverStreamBuilder;
+use crate::kernel::scan_row_in_eval;
 
 /// A boxed, `Send`able stream of [`ScanMetadata`] results produced while scanning a snapshot.
 pub type SendableScanMetadataStream = Pin<Box<dyn Stream<Item = DeltaResult<ScanMetadata>> + Send>>;
@@ -165,9 +167,9 @@ fn with_kernel_stats_output(
         StatsSourcePolicy::ParsedWithJsonFallback => match materialization.stats_projection() {
             StatsProjection::None => builder.with_stats(StatsOptions::none()),
             StatsProjection::Full => builder.with_stats(StatsOptions::all()),
-            StatsProjection::PredicateColumns(columns) => {
-                builder.with_stats(StatsOptions::struct_columns(columns.iter().cloned().collect()))
-            }
+            StatsProjection::PredicateColumns(columns) => builder.with_stats(
+                StatsOptions::struct_columns(columns.iter().cloned().collect()),
+            ),
             // The kernel API has no explicit numRecords only stats output mode. Use the
             // default scan output and materialize the row count schema when needed.
             StatsProjection::NumRecordsOnly => builder,
@@ -407,28 +409,11 @@ impl Scan {
     }
 
     /// Stream the per-file [`ScanMetadata`] for this scan, driving log replay on `engine`.
+    ///
+    /// Natively, log replay runs on the blocking pool and batches are streamed through a
+    /// channel. On wasm there is no blocking pool: replay runs eagerly on the caller
+    /// against primed log data, and the collected batches are returned as a ready stream.
     pub fn scan_metadata(&self, engine: Arc<dyn Engine>) -> SendableScanMetadataStream {
-        // TODO: which capacity to choose?
-        let mut builder = ReceiverStreamBuilder::<ScanMetadata>::new(100);
-        let tx = builder.tx();
-
-        let inner = self.inner.clone();
-        let blocking_iter = move || {
-            let mut items: u64 = 0;
-            for res in inner.scan_metadata(engine.as_ref())? {
-                items += 1;
-                if tx.blocking_send(Ok(res?)).is_err() {
-                    break;
-                }
-            }
-            tracing::Span::current().record("items", items);
-            crate::kernel::mlflow::record_json(
-                crate::kernel::mlflow::FIELD_SPAN_OUTPUTS,
-                &serde_json::json!({ "files": items, "seeded": false }),
-            );
-            Ok(())
-        };
-
         let span = tracing::info_span!(
             "kernel::scan_metadata",
             items = tracing::field::Empty,
@@ -442,8 +427,36 @@ impl Scan {
             crate::kernel::mlflow::FIELD_SPAN_INPUTS,
             &serde_json::json!({ "kernel_api": "Scan::scan_metadata", "seeded": false }),
         );
-        builder.spawn_blocking_in_span(span, blocking_iter);
-        builder.build()
+        let inner = self.inner.clone();
+
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            // TODO: which capacity to choose?
+            let mut builder = ReceiverStreamBuilder::<ScanMetadata>::new(100);
+            let tx = builder.tx();
+
+            let blocking_iter = move || {
+                let mut items: u64 = 0;
+                for res in inner.scan_metadata(engine.as_ref())? {
+                    items += 1;
+                    if tx.blocking_send(Ok(res?)).is_err() {
+                        break;
+                    }
+                }
+                tracing::Span::current().record("items", items);
+                crate::kernel::mlflow::record_json(
+                    crate::kernel::mlflow::FIELD_SPAN_OUTPUTS,
+                    &serde_json::json!({ "files": items, "seeded": false }),
+                );
+                Ok(())
+            };
+            builder.spawn_blocking_in_span(span, blocking_iter);
+            builder.build()
+        }
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            eager_scan_metadata_stream(span, false, move || inner.scan_metadata(engine.as_ref()))
+        }
     }
 
     #[cfg(feature = "datafusion")]
@@ -496,30 +509,6 @@ impl Scan {
                     .expect("malformed cached log data")
             });
 
-        // TODO: which capacity to choose?
-        let mut builder = ReceiverStreamBuilder::<ScanMetadata>::new(100);
-        let tx = builder.tx();
-        let scan_inner = move || {
-            let mut items: u64 = 0;
-            for res in inner.scan_metadata_from(
-                engine.as_ref(),
-                existing_version,
-                Box::new(scan_row_iter),
-                existing_predicate,
-            )? {
-                items += 1;
-                if tx.blocking_send(Ok(res?)).is_err() {
-                    break;
-                }
-            }
-            tracing::Span::current().record("items", items);
-            crate::kernel::mlflow::record_json(
-                crate::kernel::mlflow::FIELD_SPAN_OUTPUTS,
-                &serde_json::json!({ "files": items, "seeded": true }),
-            );
-            Ok(())
-        };
-
         let span = tracing::info_span!(
             "kernel::scan_metadata",
             seeded = true,
@@ -538,7 +527,78 @@ impl Scan {
                 "from_version": existing_version,
             }),
         );
-        builder.spawn_blocking_in_span(span, scan_inner);
-        builder.build()
+
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            // TODO: which capacity to choose?
+            let mut builder = ReceiverStreamBuilder::<ScanMetadata>::new(100);
+            let tx = builder.tx();
+            let scan_inner = move || {
+                let mut items: u64 = 0;
+                for res in inner.scan_metadata_from(
+                    engine.as_ref(),
+                    existing_version,
+                    Box::new(scan_row_iter),
+                    existing_predicate,
+                )? {
+                    items += 1;
+                    if tx.blocking_send(Ok(res?)).is_err() {
+                        break;
+                    }
+                }
+                tracing::Span::current().record("items", items);
+                crate::kernel::mlflow::record_json(
+                    crate::kernel::mlflow::FIELD_SPAN_OUTPUTS,
+                    &serde_json::json!({ "files": items, "seeded": true }),
+                );
+                Ok(())
+            };
+            builder.spawn_blocking_in_span(span, scan_inner);
+            builder.build()
+        }
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            eager_scan_metadata_stream(span, true, move || {
+                inner.scan_metadata_from(
+                    engine.as_ref(),
+                    existing_version,
+                    Box::new(scan_row_iter),
+                    existing_predicate,
+                )
+            })
+        }
+    }
+}
+
+/// Drive a kernel scan-metadata iterator to completion on the calling task and return the
+/// collected batches as an immediately-ready stream.
+///
+/// This is the wasm replacement for the blocking-pool + channel streaming path: the kernel
+/// iterator's synchronous handler calls complete inline against primed log data, and the
+/// iterator cannot be wrapped lazily because it borrows the engine it is driven on.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn eager_scan_metadata_stream<I>(
+    span: tracing::Span,
+    seeded: bool,
+    make_iter: impl FnOnce() -> delta_kernel::DeltaResult<I>,
+) -> SendableScanMetadataStream
+where
+    I: Iterator<Item = delta_kernel::DeltaResult<ScanMetadata>>,
+{
+    let result = span.in_scope(|| -> DeltaResult<Vec<ScanMetadata>> {
+        let mut items = Vec::new();
+        for res in make_iter()? {
+            items.push(res?);
+        }
+        tracing::Span::current().record("items", items.len() as u64);
+        crate::kernel::mlflow::record_json(
+            crate::kernel::mlflow::FIELD_SPAN_OUTPUTS,
+            &serde_json::json!({ "files": items.len(), "seeded": seeded }),
+        );
+        Ok(items)
+    });
+    match result {
+        Ok(items) => Box::pin(futures::stream::iter(items.into_iter().map(Ok))),
+        Err(err) => Box::pin(once(ready(Err(err)))),
     }
 }

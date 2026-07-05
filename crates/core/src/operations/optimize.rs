@@ -39,7 +39,6 @@ use futures::stream::BoxStream;
 use futures::{Future, StreamExt, TryStreamExt};
 use indexmap::IndexMap;
 use itertools::Itertools;
-use num_cpus;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::errors::ParquetError;
 use parquet::file::properties::WriterProperties;
@@ -317,7 +316,7 @@ impl<'a> OptimizeBuilder<'a> {
             target_size: None,
             writer_properties: None,
             commit_properties: CommitProperties::default(),
-            max_concurrent_tasks: num_cpus::get(),
+            max_concurrent_tasks: crate::operations::available_parallelism(),
             optimize_type: OptimizeType::Compact,
             min_commit_interval: None,
             session: None,

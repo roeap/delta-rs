@@ -258,7 +258,7 @@ fn max_concurrent_writers() -> usize {
         std::env::var("DELTARS_MAX_CONCURRENT_WRITERS")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or_else(num_cpus::get)
+            .unwrap_or_else(crate::operations::available_parallelism)
             .clamp(1, 128)
     })
 }

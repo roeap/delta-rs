@@ -44,7 +44,7 @@ use url::Url;
 use super::{Action, CommitInfo, Metadata, Protocol};
 use crate::checkpoints::parse_last_checkpoint_hint;
 use crate::kernel::arrow::engine_ext::{ExpressionEvaluatorExt, rb_from_scan_meta};
-use crate::kernel::{ARROW_HANDLER, StructType, spawn_blocking_in_span};
+use crate::kernel::{ARROW_HANDLER, StructType, run_blocking_in_span};
 use crate::logstore::{LogStore, LogStoreExt};
 use crate::{DeltaResult, DeltaTableConfig, DeltaTableError, PartitionFilter, to_kernel_predicate};
 
@@ -221,15 +221,14 @@ impl Snapshot {
             }),
         );
         let build_span = span.clone();
-        let snapshot = match spawn_blocking_in_span(build_span, move || {
+        let snapshot = match run_blocking_in_span(build_span, move || {
             let mut builder = KernelSnapshot::builder_for(table_root);
             if let Some(version) = version {
                 builder = builder.at_version(version);
             }
             builder.build(engine.as_ref())
         })
-        .await
-        .map_err(|e| DeltaTableError::Generic(e.to_string()))?
+        .await?
         {
             Ok(snapshot) => snapshot,
             Err(e) => {
@@ -312,15 +311,14 @@ impl Snapshot {
             }),
         );
         let build_span = span.clone();
-        let snapshot = spawn_blocking_in_span(build_span, move || {
+        let snapshot = run_blocking_in_span(build_span, move || {
             let mut builder = KernelSnapshot::builder_from(current);
             if let Some(version) = target_version {
                 builder = builder.at_version(version);
             }
             builder.build(task_engine.as_ref())
         })
-        .await
-        .map_err(|e| DeltaTableError::Generic(e.to_string()))??;
+        .await??;
         span.record("version", snapshot.version());
         crate::kernel::mlflow::record_json_in(
             &span,
@@ -1098,11 +1096,10 @@ impl Snapshot {
             "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_TASK,
             "delta.zone" = crate::kernel::mlflow::ZONE_KERNEL,
         );
-        let version = spawn_blocking_in_span(span, move || {
+        let version = run_blocking_in_span(span, move || {
             inner.get_app_id_version(&app_id, engine.as_ref())
         })
-        .await
-        .map_err(|e| DeltaTableError::GenericError { source: e.into() })??;
+        .await??;
         if let Some(version) = version {
             return Ok(Some(version));
         }
@@ -1128,11 +1125,10 @@ impl Snapshot {
             "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_TASK,
             "delta.zone" = crate::kernel::mlflow::ZONE_KERNEL,
         );
-        let metadata = spawn_blocking_in_span(span, move || {
+        let metadata = run_blocking_in_span(span, move || {
             inner.get_domain_metadata(&domain, engine.as_ref())
         })
-        .await
-        .map_err(|e| DeltaTableError::GenericError { source: e.into() })??;
+        .await??;
         Ok(metadata)
     }
 }
@@ -1257,7 +1253,7 @@ async fn read_last_checkpoint_version(
         "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_TASK,
         "delta.zone" = crate::kernel::mlflow::ZONE_KERNEL,
     );
-    spawn_blocking_in_span(span, move || {
+    run_blocking_in_span(span, move || {
         let storage = engine.storage_handler();
         let checkpoint_path = log_root
             .join("_last_checkpoint")
@@ -1272,8 +1268,7 @@ async fn read_last_checkpoint_version(
             }
         }
     })
-    .await
-    .map_err(|e| DeltaTableError::Generic(e.to_string()))?
+    .await?
 }
 
 pub(crate) async fn resolve_snapshot(

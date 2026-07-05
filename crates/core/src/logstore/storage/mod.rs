@@ -1,4 +1,5 @@
 //! Object storage backend abstraction layer for Delta Table transaction logs and data
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::io::Read;
 use std::sync::{Arc, LazyLock};
 

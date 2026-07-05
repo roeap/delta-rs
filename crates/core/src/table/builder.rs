@@ -309,6 +309,9 @@ impl DeltaTableBuilder {
 }
 
 enum UriType {
+    // On wasm the variant is never constructed (local paths error out earlier), so the
+    // payload is never read there.
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), allow(dead_code))]
     LocalPath(PathBuf),
     Url(Url),
 }

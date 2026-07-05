@@ -4,12 +4,14 @@ use std::{
 };
 
 use dashmap::DashMap;
-use object_store::{DynObjectStore, path::Path};
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+use object_store::DynObjectStore;
+use object_store::path::Path;
 use url::Url;
 
-use super::{LogStore, ObjectStoreRef, StorageConfig, default_logstore};
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use super::DeltaIOStorageBackend;
+use super::{LogStore, ObjectStoreRef, StorageConfig, default_logstore};
 use crate::{DeltaResult, DeltaTableError};
 
 /// Factory registry to manage [`ObjectStoreFactory`] instances

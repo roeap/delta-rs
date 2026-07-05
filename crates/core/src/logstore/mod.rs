@@ -55,15 +55,15 @@ use bytes::Bytes;
 use datafusion::datasource::object_store::ObjectStoreUrl;
 // The tokio-based default engine lives in a separate, native-only crate as of
 // kernel v0.25.0. On wasm the host supplies its own engine instead.
+use delta_kernel::log_segment::LogSegment;
+use delta_kernel::path::{LogPathFileType, ParsedLogPath};
+use delta_kernel::{AsAny, Engine};
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use delta_kernel_default_engine::DefaultEngineBuilder;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use delta_kernel_default_engine::executor::tokio::{
     TokioBackgroundExecutor, TokioMultiThreadExecutor,
 };
-use delta_kernel::log_segment::LogSegment;
-use delta_kernel::path::{LogPathFileType, ParsedLogPath};
-use delta_kernel::{AsAny, Engine};
 use futures::StreamExt;
 use object_store::ObjectStoreScheme;
 use object_store::{Error as ObjectStoreError, ObjectStore, ObjectStoreExt as _, path::Path};
@@ -72,6 +72,7 @@ use serde::de::{Error, SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize};
 use serde_json::Deserializer;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use tokio::runtime::RuntimeFlavor;
 use tracing::*;
 use url::Url;

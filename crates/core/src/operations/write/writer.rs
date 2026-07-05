@@ -294,7 +294,7 @@ impl DeltaWriter {
                 let writer_actions = writer.close().await?;
                 Ok::<_, DeltaTableError>(writer_actions)
             })
-            .buffered(num_cpus::get())
+            .buffered(crate::operations::available_parallelism())
             .try_fold(Vec::new(), |mut acc, actions| {
                 acc.extend(actions);
                 futures::future::ready(Ok(acc))

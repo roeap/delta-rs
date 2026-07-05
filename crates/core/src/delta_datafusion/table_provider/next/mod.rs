@@ -267,6 +267,7 @@ pub(crate) fn canonical_table_root_identity(root: &url::Url) -> url::Url {
     root
 }
 
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn canonical_local_table_root_url(root: &url::Url) -> Option<url::Url> {
     let path = root.to_file_path().ok()?;
     let canonical_path = std::fs::canonicalize(path).ok()?;
@@ -275,6 +276,13 @@ fn canonical_local_table_root_url(root: &url::Url) -> Option<url::Url> {
     Some(ensure_table_root_url(&normalize_table_url(&canonical_root)))
 }
 
+/// No local filesystem on wasm: `file://` URLs cannot be canonicalized (and never resolve).
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn canonical_local_table_root_url(_root: &url::Url) -> Option<url::Url> {
+    None
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn canonical_local_file_url(url: &url::Url) -> Option<url::Url> {
     if url.scheme() != "file" {
         return None;
@@ -282,6 +290,12 @@ fn canonical_local_file_url(url: &url::Url) -> Option<url::Url> {
     let path = url.to_file_path().ok()?;
     let canonical_path = std::fs::canonicalize(path).ok()?;
     Url::from_file_path(canonical_path).ok()
+}
+
+/// No local filesystem on wasm: `file://` URLs cannot be canonicalized (and never resolve).
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn canonical_local_file_url(_url: &url::Url) -> Option<url::Url> {
+    None
 }
 
 fn strip_url_sensitive_parts(url: &mut Url) {

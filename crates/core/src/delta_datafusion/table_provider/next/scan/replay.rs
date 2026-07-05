@@ -144,7 +144,19 @@ where
                     Err(err) => return Poll::Ready(Some(Err(err.into()))),
                 };
 
+                // Deletion vectors are not supported on wasm (v1): loading them requires
+                // the blocking pool, and the fetch-primed store never contains DV files.
+                // Fail loud before any load is attempted.
+                #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+                if let Some(file) = ctx.files.iter().find(|f| f.dv_info.has_vector()) {
+                    return Poll::Ready(Some(Err(DeltaTableError::Generic(format!(
+                        "deletion vectors are not supported on wasm (v1): {}",
+                        file.file_url
+                    )))));
+                }
+
                 // Spawn tasks to read the deletion vectors from disk.
+                #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
                 for file in &ctx.files {
                     if file.dv_info.has_vector() {
                         let engine = this.engine.clone();
@@ -402,6 +414,9 @@ struct ScanFileContextInner {
     /// Transformations to apply to the data in the file.
     pub transform: Option<ExpressionRef>,
     /// Number of records in the file from Add-file stats.
+    ///
+    /// Only read when spawning deletion-vector loads, which are cfg'd off on wasm.
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), allow(dead_code))]
     pub num_records: Option<u64>,
 
     pub dv_info: DvInfo,

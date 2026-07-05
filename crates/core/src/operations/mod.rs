@@ -607,3 +607,17 @@ pub(crate) fn get_target_file_size(
             .unwrap_or(crate::table::config::DEFAULT_TARGET_FILE_SIZE),
     }
 }
+
+/// Available CPU parallelism used to size concurrent work (writer fan-out, task pools).
+///
+/// wasm32-unknown-unknown has no threads, so parallelism is fixed at 1 there.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) fn available_parallelism() -> usize {
+    num_cpus::get()
+}
+
+/// Available CPU parallelism used to size concurrent work (writer fan-out, task pools).
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) fn available_parallelism() -> usize {
+    1
+}
