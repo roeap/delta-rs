@@ -34,6 +34,9 @@ fn js_err(err: impl std::fmt::Display) -> JsError {
 struct JsOpenOptions {
     /// Table version to load; latest when omitted.
     version: Option<u64>,
+    /// The catalog's latest ratified version. Required for catalog-managed
+    /// (`catalogManaged`) tables; omit for filesystem/external tables.
+    max_catalog_version: Option<u64>,
     /// `_delta_log` manifest (paths relative to the table root). Required for plain
     /// HTTP hosts, which cannot list.
     manifest: Option<Vec<JsManifestEntry>>,
@@ -107,6 +110,7 @@ impl WasmDeltaTable {
             source,
             OpenOptions {
                 version: opts.version,
+                max_catalog_version: opts.max_catalog_version,
                 limits,
                 executor: None,
             },

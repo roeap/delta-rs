@@ -202,6 +202,24 @@ impl Snapshot {
         config: DeltaTableConfig,
         version: Option<Version>,
     ) -> DeltaResult<Self> {
+        Self::try_new_with_engine_and_catalog_version(engine, table_root, config, version, None)
+            .await
+    }
+
+    /// Build a snapshot, additionally supplying the catalog's latest ratified version.
+    ///
+    /// Catalog-managed tables (the `catalogManaged` table feature) require the kernel to know
+    /// the catalog's latest version — the filesystem log alone is not authoritative. Pass
+    /// `max_catalog_version` for those tables; leave it `None` for filesystem/external tables
+    /// (the kernel rejects a catalog version on a non-catalog-managed table). This mirrors the
+    /// native read path's [`SnapshotBuilder::with_max_catalog_version`].
+    pub async fn try_new_with_engine_and_catalog_version(
+        engine: Arc<dyn Engine>,
+        table_root: Url,
+        config: DeltaTableConfig,
+        version: Option<Version>,
+        max_catalog_version: Option<Version>,
+    ) -> DeltaResult<Self> {
         let span = tracing::info_span!(
             "kernel::snapshot_build",
             table_uri = %table_root,
@@ -218,6 +236,7 @@ impl Snapshot {
             &serde_json::json!({
                 "kernel_api": "Snapshot::builder_for",
                 "requested_version": version,
+                "max_catalog_version": max_catalog_version,
             }),
         );
         let build_span = span.clone();
@@ -225,6 +244,9 @@ impl Snapshot {
             let mut builder = KernelSnapshot::builder_for(table_root);
             if let Some(version) = version {
                 builder = builder.at_version(version);
+            }
+            if let Some(max_catalog_version) = max_catalog_version {
+                builder = builder.with_max_catalog_version(max_catalog_version);
             }
             builder.build(engine.as_ref())
         })

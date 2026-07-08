@@ -62,6 +62,13 @@ pub const TABLE_NAME: &str = "delta";
 pub struct OpenOptions {
     /// Table version to load; latest when `None`.
     pub version: Option<u64>,
+    /// The catalog's latest ratified version, for catalog-managed (`catalogManaged`) tables.
+    ///
+    /// Required for catalog-managed tables — the kernel refuses to build their snapshot
+    /// without it, since the filesystem log alone is not authoritative. Leave `None` for
+    /// filesystem/external tables (the kernel rejects a catalog version on a
+    /// non-catalog-managed table).
+    pub max_catalog_version: Option<u64>,
     /// Guardrails for [`PrimedStore::prime`].
     pub limits: PrimeLimits,
     /// Executor driving the sync kernel engine. Defaults to the target's natural choice
@@ -154,11 +161,12 @@ pub async fn open_table_with_store(
     let ctx = session(store.clone(), &table_url)?;
     let executor = options.executor.unwrap_or_else(ExecutorHandle::current);
     let engine = Arc::new(DataFusionEngine::new(ctx.task_ctx(), executor));
-    let snapshot = Snapshot::try_new_with_engine(
+    let snapshot = Snapshot::try_new_with_engine_and_catalog_version(
         engine,
         table_url,
         DeltaTableConfig::default(),
         options.version,
+        options.max_catalog_version,
     )
     .await?;
 
