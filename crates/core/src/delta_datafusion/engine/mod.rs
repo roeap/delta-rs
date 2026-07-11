@@ -6,3 +6,6 @@
 
 pub(crate) use deltalake_kernel_executor::expressions::*;
 pub use deltalake_kernel_executor::{AsObjectStoreUrl, DataFusionEngine};
+// Public DataFusion `Expr` → kernel `Predicate` converter (checkpoint row-group
+// skipping); see `deltalake_kernel_executor::expressions::to_delta_predicate`.
+pub use deltalake_kernel_executor::expressions::to_delta_predicate;
