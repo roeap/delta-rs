@@ -16,7 +16,12 @@ use crate::kernel::scalars::ScalarExt;
 ///
 /// If the expression converts to a Delta predicate, returns it directly.
 /// Otherwise, wraps the expression as a boolean expression predicate.
-pub(crate) fn to_delta_predicate(expr: &Expr) -> Result<Predicate> {
+///
+/// Exposed publicly so external consumers (e.g. a Delta-log table provider) can
+/// push a query predicate into checkpoint-parquet row-group skipping, reusing
+/// this converter instead of reimplementing it. Expressions the kernel predicate
+/// model cannot represent are an error here.
+pub fn to_delta_predicate(expr: &Expr) -> Result<Predicate> {
     match to_delta_expression(&normalize_delta_predicate_expr(expr)?)? {
         Expression::Predicate(pred) => Ok(pred.as_ref().clone()),
         expr => Ok(Predicate::BooleanExpression(expr)),
