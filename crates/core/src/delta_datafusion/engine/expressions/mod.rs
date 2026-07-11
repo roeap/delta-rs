@@ -1,5 +1,10 @@
 pub(crate) use self::to_datafusion::*;
 pub(crate) use self::to_kernel::*;
+// Publicly re-exported so external consumers (e.g. a Delta-log table provider)
+// can translate a DataFusion `Expr` into a kernel `Predicate` for checkpoint
+// row-group skipping, reusing this battle-tested converter instead of
+// reimplementing it.
+pub use self::to_kernel::to_delta_predicate;
 
 mod opaque;
 mod to_datafusion;

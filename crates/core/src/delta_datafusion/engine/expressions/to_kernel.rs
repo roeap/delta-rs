@@ -26,7 +26,7 @@ use crate::kernel::scalars::ScalarExt;
 /// invoke [`try_opaque_predicate`] as an explicit fallback *after* their own
 /// safety guards (e.g. schema-override type-mismatch checks) — opaque wrapping
 /// is deliberately not folded into this function so it cannot bypass them.
-pub(crate) fn to_delta_predicate(expr: &Expr) -> Result<Predicate> {
+pub fn to_delta_predicate(expr: &Expr) -> Result<Predicate> {
     match to_delta_expression(&normalize_delta_predicate_expr(expr)?)? {
         Expression::Predicate(pred) => Ok(pred.as_ref().clone()),
         expr => Ok(Predicate::BooleanExpression(expr)),

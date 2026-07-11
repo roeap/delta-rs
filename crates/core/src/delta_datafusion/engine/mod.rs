@@ -9,6 +9,9 @@ use futures::{StreamExt as _, stream::BoxStream};
 use url::Url;
 
 pub(crate) use self::expressions::*;
+// Public DataFusion `Expr` → kernel `Predicate` converter (checkpoint row-group
+// skipping); see `expressions::to_delta_predicate`.
+pub use self::expressions::to_delta_predicate;
 use self::file_formats::DataFusionFileFormatHandler;
 pub use self::storage::{AsObjectStoreUrl, DataFusionStorageHandler};
 use crate::kernel::ARROW_HANDLER;
