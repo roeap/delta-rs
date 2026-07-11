@@ -6,6 +6,9 @@ use delta_kernel::{Engine, EvaluationHandler, JsonHandler, ParquetHandler, Stora
 use tokio::runtime::Handle;
 
 pub(crate) use self::expressions::*;
+// Public DataFusion `Expr` → kernel `Predicate` converter (checkpoint row-group
+// skipping); see `expressions::to_delta_predicate`.
+pub use self::expressions::to_delta_predicate;
 use self::file_formats::DataFusionFileFormatHandler;
 pub use self::storage::AsObjectStoreUrl;
 use self::storage::DataFusionStorageHandler;
