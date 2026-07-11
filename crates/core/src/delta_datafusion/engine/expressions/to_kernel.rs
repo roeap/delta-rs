@@ -16,7 +16,7 @@ use crate::kernel::scalars::ScalarExt;
 ///
 /// If the expression converts to a Delta predicate, returns it directly.
 /// Otherwise, wraps the expression as a boolean expression predicate.
-pub(crate) fn to_delta_predicate(expr: &Expr) -> Result<Predicate> {
+pub fn to_delta_predicate(expr: &Expr) -> Result<Predicate> {
     match to_delta_expression(&normalize_delta_predicate_expr(expr)?)? {
         Expression::Predicate(pred) => Ok(pred.as_ref().clone()),
         expr => Ok(Predicate::BooleanExpression(expr)),
