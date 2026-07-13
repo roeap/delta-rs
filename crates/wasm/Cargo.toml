@@ -15,7 +15,7 @@ rust-version.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-deltalake-core = { version = "1", path = "../core", default-features = false, features = [
+deltalake-core = { version = "0.32", path = "../core", default-features = false, features = [
     "datafusion",
 ] }
 
@@ -32,7 +32,7 @@ url = { workspace = true }
 # Native builds of deltalake-core require a TLS backend feature; the wasm target
 # needs none (the host supplies a fetch-backed store), so re-add it natively only.
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
-deltalake-core = { version = "1", path = "../core", default-features = false, features = [
+deltalake-core = { version = "0.32", path = "../core", default-features = false, features = [
     "datafusion",
     "rustls",
 ] }

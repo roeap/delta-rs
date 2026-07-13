@@ -15,7 +15,7 @@ rust-version.workspace = true
 features = ["datafusion", "json"]
 
 [dependencies]
-deltalake-derive = { version = "1", path = "../derive" }
+deltalake-derive = { version = "0.32", path = "../derive" }
 
 delta_kernel.workspace = true
 
