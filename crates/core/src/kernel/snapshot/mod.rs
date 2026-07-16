@@ -172,6 +172,15 @@ impl Snapshot {
         }
     }
 
+    /// The underlying kernel snapshot, as a shared [`SnapshotRef`](delta_kernel::snapshot::SnapshotRef).
+    ///
+    /// Additive accessor that exposes the `pub(crate)` kernel snapshot so out-of-tree engines
+    /// (e.g. an `sm_plans`-driven `TableProvider`) can drive kernel scan APIs directly against
+    /// the opened table's snapshot. Clones the `Arc` (cheap refcount bump).
+    pub fn kernel_snapshot(&self) -> Arc<KernelSnapshot> {
+        self.inner.clone()
+    }
+
     /// Create a new [`Snapshot`] instance
     pub async fn try_new(
         log_store: &dyn LogStore,
