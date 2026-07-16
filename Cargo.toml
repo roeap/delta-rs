@@ -23,7 +23,7 @@ repository = "https://github.com/delta-io/delta.rs"
 # API (to retire the home-grown ExecutorHandle/InlineExecutor bridge) is a
 # tracked follow-up, not part of this bump.
 #
-# NOTE: rev 2cf01549 must be pushed to the roeap fork before this resolves for
+# NOTE: rev c70137e7 must be pushed to the roeap fork before this resolves for
 # anyone else / in CI. For local development against an adjacent checkout, swap
 # the `git`+`rev` for `path = "../delta-kernel-rs/kernel"` (and the default-engine
 # path); do not commit the path form.
@@ -32,7 +32,7 @@ repository = "https://github.com/delta-io/delta.rs"
 # default alias is arrow-59, and delta_kernel_default_engine's `default` enables
 # it — leaving defaults on would union arrow-59 into this arrow-58 graph, which
 # splits `arrow_schema::Schema` from `delta_kernel::arrow::datatypes::Schema`.
-delta_kernel = { git = "https://github.com/roeap/delta-kernel-rs", rev = "2cf015496d437859e836aaffa39cc128507b5f52", package = "delta_kernel", default-features = false, features = [
+delta_kernel = { git = "https://github.com/roeap/delta-kernel-rs", rev = "c70137e7c99552e2ac531e873d4dc4499476f3b6", package = "delta_kernel", default-features = false, features = [
     "arrow-58",
     "internal-api",
     # gates the `engine` module + arrow_conversion/arrow_data/arrow_expression
@@ -41,7 +41,7 @@ delta_kernel = { git = "https://github.com/roeap/delta-kernel-rs", rev = "2cf015
 ] }
 # native-only (hard tokio rt-multi-thread); on wasm the host supplies its own engine.
 # default-features off + explicit arrow-58/rustls to avoid pulling the arrow-59 default.
-delta_kernel_default_engine = { git = "https://github.com/roeap/delta-kernel-rs", rev = "2cf015496d437859e836aaffa39cc128507b5f52", package = "delta_kernel_default_engine", default-features = false, features = [
+delta_kernel_default_engine = { git = "https://github.com/roeap/delta-kernel-rs", rev = "c70137e7c99552e2ac531e873d4dc4499476f3b6", package = "delta_kernel_default_engine", default-features = false, features = [
     "arrow-58",
     "rustls",
 ] }
