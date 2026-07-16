@@ -16,20 +16,35 @@ documentation = "https://docs.rs/deltalake"
 repository = "https://github.com/delta-io/delta.rs"
 
 [workspace.dependencies]
-# wasm-engine: pinned to the wasm-kernel-compat branch of the delta-kernel-rs
-# fork (package `delta_kernel`, v0.25.0). See WASM_ENGINE.md for the kernel-fork
-# deltas this rev carries (wasm32 target support; opaque-predicate-adaptor
-# visibility; wasm-safe data-skipping timer).
-delta_kernel = { git = "https://github.com/roeap/delta-kernel-rs", rev = "530e94d241779dfc17eda242f554b24091e00d23", package = "delta_kernel", features = [
+# Repointed to the delta-kernel-rs `sm-plans-consolidation` line. The classic
+# scan/snapshot path this crate uses is signature-stable vs the previous rev
+# (530e94d): the only source change required was implementing the newly-added
+# `StorageHandler::delete`. Adopting the kernel's sm_plans state-machine scan
+# API (to retire the home-grown ExecutorHandle/InlineExecutor bridge) is a
+# tracked follow-up, not part of this bump.
+#
+# NOTE: rev 2cf01549 must be pushed to the roeap fork before this resolves for
+# anyone else / in CI. For local development against an adjacent checkout, swap
+# the `git`+`rev` for `path = "../delta-kernel-rs/kernel"` (and the default-engine
+# path); do not commit the path form.
+#
+# Both crates MUST pin `arrow-58` with default-features OFF: the kernel's `arrow`
+# default alias is arrow-59, and delta_kernel_default_engine's `default` enables
+# it — leaving defaults on would union arrow-59 into this arrow-58 graph, which
+# splits `arrow_schema::Schema` from `delta_kernel::arrow::datatypes::Schema`.
+delta_kernel = { git = "https://github.com/roeap/delta-kernel-rs", rev = "2cf015496d437859e836aaffa39cc128507b5f52", package = "delta_kernel", default-features = false, features = [
     "arrow-58",
     "internal-api",
-    # v0.25.0 gates the `engine` module + arrow_conversion/arrow_data/arrow_expression
-    # submodules (used throughout delta-rs core) behind default-engine-base.
+    # gates the `engine` module + arrow_conversion/arrow_data/arrow_expression
+    # submodules (used throughout delta-rs core).
     "default-engine-base",
 ] }
-# v0.25.0 relocated the tokio-based DefaultEngine into its own crate. It is
 # native-only (hard tokio rt-multi-thread); on wasm the host supplies its own engine.
-delta_kernel_default_engine = { git = "https://github.com/roeap/delta-kernel-rs", rev = "530e94d241779dfc17eda242f554b24091e00d23", package = "delta_kernel_default_engine" }
+# default-features off + explicit arrow-58/rustls to avoid pulling the arrow-59 default.
+delta_kernel_default_engine = { git = "https://github.com/roeap/delta-kernel-rs", rev = "2cf015496d437859e836aaffa39cc128507b5f52", package = "delta_kernel_default_engine", default-features = false, features = [
+    "arrow-58",
+    "rustls",
+] }
 
 
 # arrow

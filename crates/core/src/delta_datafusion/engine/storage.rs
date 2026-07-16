@@ -231,6 +231,18 @@ async fn head_impl(store: Arc<DynObjectStore>, url: Url) -> DeltaResult<FileMeta
     })
 }
 
+/// Native async implementation for delete.
+///
+/// The kernel's `StorageHandler::delete` contract is idempotent: deleting a path
+/// that does not exist returns `Ok(())`; any other error propagates.
+async fn delete_impl(store: Arc<DynObjectStore>, path: Path) -> DeltaResult<()> {
+    match store.delete(&path).await {
+        Ok(()) => Ok(()),
+        Err(object_store::Error::NotFound { .. }) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 impl StorageHandler for DataFusionStorageHandler {
     fn list_from(
         &self,
@@ -355,6 +367,26 @@ impl StorageHandler for DataFusionStorageHandler {
 
         let future = head_impl(store, path.clone());
 
+        self.task_executor.try_block_on(future)?
+    }
+
+    fn delete(&self, path: &Url) -> DeltaResult<()> {
+        let span = tracing::debug_span!(
+            "engine::delete",
+            path = %path,
+            "mlflow.spanType" = crate::kernel::mlflow::SPAN_TYPE_TOOL,
+            "delta.zone" = crate::kernel::mlflow::ZONE_ENGINE,
+        );
+        let _enter = span.enter();
+        let store_url = path.as_object_store_url();
+        let store = self
+            .ctx
+            .runtime_env()
+            .object_store(store_url)
+            .map_err(Error::generic_err)?;
+
+        let object_path = Path::from_url_path(path.path())?;
+        let future = delete_impl(store, object_path);
         self.task_executor.try_block_on(future)?
     }
 }
