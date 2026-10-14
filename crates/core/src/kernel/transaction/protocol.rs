@@ -312,6 +312,12 @@ pub static INSTANCE: LazyLock<ProtocolChecker> = LazyLock::new(|| {
     reader_features.insert(TableFeature::VariantType);
     reader_features.insert(TableFeature::VariantTypePreview);
     reader_features.insert(TableFeature::V2Checkpoint);
+    // Reading catalog-managed (coordinated-commit) tables is safe: the snapshot is built by the
+    // caller with the catalog's log tail (`Snapshot::from_kernel_snapshot`), and a vacuum
+    // protocol check only constrains writers/vacuum. Writes stay gated: committing to a
+    // catalog-managed table must go through the catalog's committer, not delta-rs.
+    reader_features.insert(TableFeature::CatalogManaged);
+    reader_features.insert(TableFeature::VacuumProtocolCheck);
     #[cfg(feature = "nanosecond-timestamps")]
     reader_features.insert(TableFeature::TimestampNanos);
     #[cfg(feature = "datafusion")]
