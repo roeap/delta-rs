@@ -201,6 +201,19 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Wrap an already-built kernel snapshot.
+    ///
+    /// Lets callers that construct the kernel snapshot themselves (e.g. catalog-managed
+    /// tables whose unbackfilled commits are supplied via the kernel snapshot builder's
+    /// `with_log_tail`) hand it to delta-rs without a second log listing. Active-file state
+    /// is materialized lazily, exactly as for [`Snapshot::try_new_with_engine`].
+    pub fn from_kernel_snapshot(inner: Arc<KernelSnapshot>) -> Self {
+        Self {
+            inner,
+            materialized_files: None,
+        }
+    }
+
     /// Build a snapshot of the table at `table_root` using the provided kernel `engine`.
     ///
     /// When `version` is `None` the latest available version is loaded. This is the engine-aware
