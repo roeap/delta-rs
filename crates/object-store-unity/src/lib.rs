@@ -6,6 +6,7 @@
 mod client;
 mod error;
 mod models;
+mod reference;
 
 pub use client::UnityClient;
 pub use error::{Error, Result};
@@ -14,3 +15,4 @@ pub use models::{
     PathOperation, R2TemporaryCredentials, TableInfo, TableOperation, TemporaryCredentials,
     VolumeInfo, VolumeOperation,
 };
+pub use reference::UnityReference;
