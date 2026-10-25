@@ -29,7 +29,8 @@ use crate::models::{PathOperation, TableOperation, TemporaryCredentials, VolumeO
 /// Stores built by this crate call [`vend`](Self::vend) whenever their cached
 /// credential nears expiry. Implement it to plug in a vending endpoint this
 /// crate does not cover, such as the Unity Catalog Delta API's table
-/// credentials (see [`TemporaryCredentials::from_storage_config`]).
+/// credentials (see [`TemporaryCredentials::from_storage_config`]). Report a
+/// vendor's own failures as [`Error::Vendor`](crate::Error::Vendor).
 #[async_trait]
 pub trait CredentialVendor: fmt::Debug + Send + Sync + 'static {
     /// Vend a fresh credential.

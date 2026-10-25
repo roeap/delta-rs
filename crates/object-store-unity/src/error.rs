@@ -30,6 +30,10 @@ pub enum Error {
     #[error("credential mismatch: {0}")]
     CredentialMismatch(String),
 
+    /// A custom [`CredentialVendor`](crate::CredentialVendor) failed to vend.
+    #[error("credential vending failed: {0}")]
+    Vendor(Box<dyn std::error::Error + Send + Sync + 'static>),
+
     /// Building or using an object store failed.
     #[error(transparent)]
     ObjectStore(#[from] object_store::Error),
