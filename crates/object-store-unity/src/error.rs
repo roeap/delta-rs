@@ -30,6 +30,10 @@ pub enum Error {
     #[error("credential mismatch: {0}")]
     CredentialMismatch(String),
 
+    /// Building or using an object store failed.
+    #[error(transparent)]
+    ObjectStore(#[from] object_store::Error),
+
     /// The credential targets a cloud whose crate feature is disabled.
     #[error("{cloud} storage requires the `{feature}` feature of object_store_unity")]
     FeatureDisabled {
