@@ -13,7 +13,8 @@ use deltalake_core::logstore::{
     object_store::RetryConfig,
 };
 use object_store_unity::{
-    AuthConfigKey, AzureIdentityKey, UnityConfigKey, UnityStoreFactoryBuilder,
+    AuthConfigKey, AzureIdentityKey, ScopedStore, TableOperation, UnityConfigKey, UnityReference,
+    UnityStoreFactory, UnityStoreFactoryBuilder,
 };
 use olai_http::bearer::BearerCredential;
 use olai_http::databricks::DatabricksConfigKey;
@@ -844,6 +845,30 @@ impl UnityCatalog {
         }
     }
 
+    /// A factory for credential-scoped object stores that vends through this
+    /// catalog's authenticated client.
+    pub fn store_factory(&self) -> Result<UnityStoreFactory, UnityCatalogError> {
+        self.store_factory_with_options(std::iter::empty::<(&str, &str)>())
+    }
+
+    /// Like [`store_factory`](Self::store_factory), also applying `options`
+    /// that configure stores (e.g. `aws_region`); unrelated keys are ignored.
+    fn store_factory_with_options<I, K, V>(
+        &self,
+        options: I,
+    ) -> Result<UnityStoreFactory, UnityCatalogError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: Into<String>,
+    {
+        Ok(UnityStoreFactoryBuilder::new()
+            .with_options(options)
+            .with_url(format!("{}/", self.catalog_url()))
+            .with_client(self.client.clone())
+            .build()?)
+    }
+
     fn catalog_url(&self) -> String {
         format!("{}/api/2.1/unity-catalog", self.workspace_url)
     }
@@ -1078,45 +1103,112 @@ impl ObjectStoreFactory for UnityCatalogFactory {
         table_uri: &Url,
         config: &StorageConfig,
     ) -> DeltaResult<(ObjectStoreRef, Path)> {
-        let (table_path, temp_creds) = if is_catalog_managed_requested(config) {
-            let (catalog, schema, table) = parse_uc_identity(table_uri).ok_or_else(|| {
-                DeltaTableError::Generic(format!(
-                    "expected a `uc://catalog.schema.table` identity, got `{table_uri}`"
-                ))
-            })?;
-            let uc = Self::new_delta_client(config)?;
-            UnityCatalogBuilder::execute_uc_future(catalog_managed_location_and_token(
-                &uc, &catalog, &schema, &table,
-            ))??
-        } else {
-            UnityCatalogBuilder::execute_uc_future(
-                UnityCatalogBuilder::get_uc_location_and_token(
-                    table_uri.as_str(),
-                    Some(&config.raw),
-                ),
-            )??
-        };
-
-        let mut storage_options = config.raw.clone();
-        storage_options.extend(temp_creds);
-
-        // TODO(roeap): we should not have to go through the table here.
-        // ideally we just create the right storage ...
-        let table_url = ensure_table_uri(&table_path)?;
-        let mut builder = DeltaTableBuilder::from_url(table_url)?;
-
-        if let Some(runtime) = &config.runtime {
-            builder = builder.with_io_runtime(runtime.clone());
+        if is_catalog_managed_requested(config) {
+            return catalog_managed_store(table_uri, config);
         }
 
-        if !storage_options.is_empty() {
-            builder = builder.with_storage_options(storage_options.clone());
-        }
-        let prefix = Path::parse(table_uri.path())?;
-        let store = builder.build_storage()?.object_store();
+        let full_name = table_full_name(table_uri)?;
+        let operation = requested_operation(config)?;
+        let uc = Self::new_delta_client(config)?;
+        let factory = uc.store_factory_with_options(&config.raw)?;
+        let store =
+            UnityCatalogBuilder::execute_uc_future(table_store(&factory, &full_name, operation))??;
 
-        Ok((store, prefix))
+        // Core roots the table at the location's path, which is empty for a
+        // `uc://` identity: hand back a store rooted at the table itself.
+        Ok((store.as_dyn(), Path::default()))
     }
+}
+
+/// Storage option selecting the table operation to vend credentials for:
+/// `read` or `read_write`. Unset, `READ_WRITE` is tried before `READ`.
+pub const UNITY_OPERATION_KEY: &str = "unity_operation";
+
+fn requested_operation(config: &StorageConfig) -> DeltaResult<Option<TableOperation>> {
+    match config
+        .raw
+        .get(UNITY_OPERATION_KEY)
+        .map(|v| v.to_ascii_lowercase())
+    {
+        None => Ok(None),
+        Some(op) if op == "read" => Ok(Some(TableOperation::Read)),
+        Some(op) if op == "read_write" => Ok(Some(TableOperation::ReadWrite)),
+        Some(other) => Err(DeltaTableError::Generic(format!(
+            "invalid `{UNITY_OPERATION_KEY}` `{other}`: expected `read` or `read_write`"
+        ))),
+    }
+}
+
+/// The three-level table name a `uc://` table URL refers to.
+fn table_full_name(table_uri: &Url) -> DeltaResult<String> {
+    match UnityReference::parse(table_uri.as_str()) {
+        Ok(UnityReference::Table {
+            catalog,
+            schema,
+            table,
+        }) => Ok(format!("{catalog}.{schema}.{table}")),
+        _ => Err(UnityCatalogError::InvalidTableURI {
+            table_uri: table_uri.to_string(),
+        }
+        .into()),
+    }
+}
+
+/// A store for `full_name` with self-refreshing credentials.
+///
+/// With an explicit `operation`, exactly that is vended. Otherwise `READ_WRITE`
+/// is tried first and `READ` on failure, as before; either way the store is
+/// bound to the operation that succeeded, so refreshes never widen access.
+async fn table_store(
+    factory: &UnityStoreFactory,
+    full_name: &str,
+    operation: Option<TableOperation>,
+) -> Result<ScopedStore, UnityCatalogError> {
+    if let Some(operation) = operation {
+        return Ok(factory.for_table(full_name, operation).await?);
+    }
+    match factory
+        .for_table(full_name, TableOperation::ReadWrite)
+        .await
+    {
+        Ok(store) => Ok(store),
+        Err(read_write) => factory
+            .for_table(full_name, TableOperation::Read)
+            .await
+            .map_err(|read| UnityCatalogError::Generic {
+                source: format!("READ_WRITE failed: {read_write}. READ failed: {read}").into(),
+            }),
+    }
+}
+
+/// The store for a catalog-managed table, from the Unity Catalog Delta API.
+fn catalog_managed_store(
+    table_uri: &Url,
+    config: &StorageConfig,
+) -> DeltaResult<(ObjectStoreRef, Path)> {
+    let (catalog, schema, table) = parse_uc_identity(table_uri).ok_or_else(|| {
+        DeltaTableError::Generic(format!(
+            "expected a `uc://catalog.schema.table` identity, got `{table_uri}`"
+        ))
+    })?;
+    let uc = UnityCatalogFactory::new_delta_client(config)?;
+    let (table_path, temp_creds) = UnityCatalogBuilder::execute_uc_future(
+        catalog_managed_location_and_token(&uc, &catalog, &schema, &table),
+    )??;
+
+    let mut storage_options = config.raw.clone();
+    storage_options.extend(temp_creds);
+
+    let table_url = ensure_table_uri(&table_path)?;
+    let mut builder = DeltaTableBuilder::from_url(table_url)?;
+    if let Some(runtime) = &config.runtime {
+        builder = builder.with_io_runtime(runtime.clone());
+    }
+    if !storage_options.is_empty() {
+        builder = builder.with_storage_options(storage_options);
+    }
+    let prefix = Path::parse(table_uri.path())?;
+    Ok((builder.build_storage()?.object_store(), prefix))
 }
 
 impl LogStoreFactory for UnityCatalogFactory {
@@ -1279,14 +1371,16 @@ impl std::fmt::Debug for UnityCatalog {
 
 #[cfg(test)]
 mod tests {
-    use crate::UnityCatalogBuilder;
     use crate::client::ClientOptions;
     use crate::client::token::TemporaryToken;
     use crate::credential::TokenCredential;
     use crate::models::tests::{GET_SCHEMA_RESPONSE, GET_TABLE_RESPONSE, LIST_SCHEMAS_RESPONSE};
     use crate::models::*;
+    use crate::{UnityCatalogBuilder, UnityCatalogFactory};
     use deltalake_core::DataCatalog;
+    use deltalake_core::logstore::{ObjectStoreFactory, StorageConfig};
     use httpmock::prelude::*;
+    use reqwest::Url;
     use reqwest_middleware::ClientWithMiddleware;
     use std::collections::HashMap;
 
@@ -1561,6 +1655,112 @@ mod tests {
                 ));
             }
         }
+    }
+
+    fn uc_storage_config(server: &MockServer, extra: &[(&str, &str)]) -> StorageConfig {
+        let mut options = HashMap::from([
+            ("databricks_host".to_string(), server.url("")),
+            ("databricks_token".to_string(), "pat".to_string()),
+            ("unity_allow_http_url".to_string(), "true".to_string()),
+            ("aws_region".to_string(), "us-east-1".to_string()),
+        ]);
+        options.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        StorageConfig::parse_options(options).unwrap()
+    }
+
+    async fn mock_orders_table(server: &MockServer) {
+        server
+            .mock_async(|when, then| {
+                when.path("/api/2.1/unity-catalog/tables/main.default.orders")
+                    .method(GET);
+                then.json_body(serde_json::json!({
+                    "table_id": "t-1",
+                    "storage_location": "s3://bucket/tables/orders"
+                }));
+            })
+            .await;
+    }
+
+    fn aws_credentials() -> serde_json::Value {
+        serde_json::json!({
+            "expiration_time": chrono::Utc::now().timestamp_millis() + 3_600_000,
+            "url": "s3://bucket/tables/orders/",
+            "aws_temp_credentials": {
+                "access_key_id": "ak", "secret_access_key": "sk", "session_token": "st"
+            }
+        })
+    }
+
+    /// `uc://` tables get a table-rooted store with self-refreshing credentials;
+    /// without an explicit operation, READ is the fallback when READ_WRITE is
+    /// denied.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_parse_url_opts_falls_back_to_read() {
+        let server = MockServer::start_async().await;
+        mock_orders_table(&server).await;
+        let read_write = server
+            .mock_async(|when, then| {
+                when.path("/api/2.1/unity-catalog/temporary-table-credentials")
+                    .json_body(serde_json::json!({"table_id": "t-1", "operation": "READ_WRITE"}));
+                then.status(403)
+                    .json_body(serde_json::json!({"error_code": "PERMISSION_DENIED"}));
+            })
+            .await;
+        let read = server
+            .mock_async(|when, then| {
+                when.path("/api/2.1/unity-catalog/temporary-table-credentials")
+                    .json_body(serde_json::json!({"table_id": "t-1", "operation": "READ"}));
+                then.json_body(aws_credentials());
+            })
+            .await;
+
+        let url = Url::parse("uc://main.default.orders").unwrap();
+        let (store, prefix) = UnityCatalogFactory::default()
+            .parse_url_opts(&url, &uc_storage_config(&server, &[]))
+            .unwrap();
+        assert!(prefix.as_ref().is_empty());
+        assert!(
+            store.to_string().contains("tables/orders"),
+            "store is not rooted at the table: {store}"
+        );
+        read_write.assert_async().await;
+        read.assert_async().await;
+    }
+
+    /// `unity_operation` vends exactly the requested operation.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_parse_url_opts_honors_requested_operation() {
+        let server = MockServer::start_async().await;
+        mock_orders_table(&server).await;
+        let read_write = server
+            .mock_async(|when, then| {
+                when.path("/api/2.1/unity-catalog/temporary-table-credentials")
+                    .json_body(serde_json::json!({"table_id": "t-1", "operation": "READ_WRITE"}));
+                then.json_body(aws_credentials());
+            })
+            .await;
+        let read = server
+            .mock_async(|when, then| {
+                when.path("/api/2.1/unity-catalog/temporary-table-credentials")
+                    .json_body(serde_json::json!({"table_id": "t-1", "operation": "READ"}));
+                then.json_body(aws_credentials());
+            })
+            .await;
+
+        let url = Url::parse("uc://main.default.orders").unwrap();
+        let config = uc_storage_config(&server, &[(super::UNITY_OPERATION_KEY, "read")]);
+        UnityCatalogFactory::default()
+            .parse_url_opts(&url, &config)
+            .unwrap();
+        read.assert_async().await;
+        read_write.assert_calls_async(0).await;
+
+        let config = uc_storage_config(&server, &[(super::UNITY_OPERATION_KEY, "admin")]);
+        assert!(
+            UnityCatalogFactory::default()
+                .parse_url_opts(&url, &config)
+                .is_err()
+        );
     }
 
     /// Unity Catalog error bodies still decode into the response enums.
