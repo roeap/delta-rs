@@ -1,4 +1,13 @@
 //! Authorization credentials
+//!
+//! Unity Catalog requests are authenticated by `olai_http`'s Databricks
+//! credential chain, configured through [`UnityCatalogBuilder`]. The providers
+//! in this module are no longer used and will be removed; [`TokenCredential`]
+//! remains the way to plug in a custom token source.
+//!
+//! [`UnityCatalogBuilder`]: crate::UnityCatalogBuilder
+// The deprecated providers below still reference each other.
+#![allow(deprecated)]
 
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -43,6 +52,9 @@ pub trait TokenCredential: std::fmt::Debug + Send + Sync + 'static {
 }
 
 /// Provides credentials for use when signing requests
+#[deprecated(
+    note = "Unity Catalog authentication is handled by olai-http; configure it through `UnityCatalogBuilder`, or implement `TokenCredential`"
+)]
 #[derive(Debug)]
 pub enum CredentialProvider {
     /// static bearer token
@@ -60,6 +72,9 @@ struct TokenResponse {
 
 /// The same thing as the azure oauth provider, but uses the databricks api to
 /// get tokens directly from the workspace.
+#[deprecated(
+    note = "Unity Catalog authentication is handled by olai-http; configure it through `UnityCatalogBuilder`, or implement `TokenCredential`"
+)]
 #[derive(Debug, Clone)]
 pub struct WorkspaceOAuthProvider {
     token_url: String,
@@ -120,6 +135,9 @@ impl TokenCredential for WorkspaceOAuthProvider {
 }
 
 /// Encapsulates the logic to perform an OAuth token challenge
+#[deprecated(
+    note = "Unity Catalog authentication is handled by olai-http; configure it through `UnityCatalogBuilder`, or implement `TokenCredential`"
+)]
 #[derive(Debug, Clone)]
 pub struct ClientSecretOAuthProvider {
     token_url: String,
@@ -210,6 +228,9 @@ struct AzureCliTokenResponse {
 }
 
 /// Credential for acquiring access tokens via the Azure CLI
+#[deprecated(
+    note = "Unity Catalog authentication is handled by olai-http; configure it through `UnityCatalogBuilder`, or implement `TokenCredential`"
+)]
 #[derive(Default, Debug)]
 pub struct AzureCliCredential {
     _private: (),
@@ -301,6 +322,9 @@ impl TokenCredential for AzureCliCredential {
 /// Credential for using workload identity dfederation
 ///
 /// <https://learn.microsoft.com/en-us/azure/active-directory/develop/workload-identity-federation>
+#[deprecated(
+    note = "Unity Catalog authentication is handled by olai-http; configure it through `UnityCatalogBuilder`, or implement `TokenCredential`"
+)]
 #[derive(Debug)]
 pub struct WorkloadIdentityOAuthProvider {
     token_url: String,
@@ -385,6 +409,9 @@ struct MsiTokenResponse {
 ///
 /// This authentication type works in Azure VMs, App Service and Azure Functions applications, as well as the Azure Cloud Shell
 /// <https://learn.microsoft.com/en-gb/azure/active-directory/managed-identities-azure-resources/how-to-use-vm-token#get-a-token-using-http>
+#[deprecated(
+    note = "Unity Catalog authentication is handled by olai-http; configure it through `UnityCatalogBuilder`, or implement `TokenCredential`"
+)]
 #[derive(Debug)]
 pub struct ImdsManagedIdentityOAuthProvider {
     msi_endpoint: String,
