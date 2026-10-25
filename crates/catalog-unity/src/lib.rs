@@ -13,8 +13,8 @@ use deltalake_core::logstore::{
     object_store::RetryConfig,
 };
 use object_store_unity::{
-    AuthConfigKey, AzureIdentityKey, ScopedStore, TableOperation, UnityConfigKey, UnityReference,
-    UnityStoreFactory, UnityStoreFactoryBuilder,
+    AuthConfigKey, AzureIdentityKey, RoutingObjectStore, ScopedStore, TableOperation,
+    UnityConfigKey, UnityReference, UnityStoreFactory, UnityStoreFactoryBuilder,
 };
 use olai_http::bearer::BearerCredential;
 use olai_http::databricks::DatabricksConfigKey;
@@ -790,6 +790,7 @@ impl UnityCatalogBuilder {
             cc_client,
             workspace_url,
             table_cache: DashMap::new(),
+            routes: DashMap::new(),
         })
     }
 }
@@ -824,6 +825,9 @@ pub struct UnityCatalog {
     cc_client: Option<UCDeltaTableClient>,
     workspace_url: String,
     table_cache: DashMap<String, GetTableResponse>,
+    /// One routing store per bucket (`scheme://authority`), shared by every
+    /// table this catalog serves from that bucket.
+    routes: DashMap<String, Arc<RoutingObjectStore>>,
 }
 
 impl UnityCatalog {
@@ -867,6 +871,15 @@ impl UnityCatalog {
             .with_url(format!("{}/", self.catalog_url()))
             .with_client(self.client.clone())
             .build()?)
+    }
+
+    /// The routing store shared by every table in `location`'s bucket.
+    pub(crate) fn routing_store(&self, location: &Url) -> Arc<RoutingObjectStore> {
+        let bucket = format!("{}://{}", location.scheme(), location.authority());
+        self.routes
+            .entry(bucket)
+            .or_insert_with(|| Arc::new(RoutingObjectStore::new()))
+            .clone()
     }
 
     fn catalog_url(&self) -> String {

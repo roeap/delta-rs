@@ -1,23 +1,21 @@
 //! Datafusion integration for UnityCatalog
 
-use chrono::prelude::*;
 use dashmap::DashMap;
 use datafusion::catalog::SchemaProvider;
 use datafusion::catalog::{CatalogProvider, CatalogProviderList};
 use datafusion::common::DataFusionError;
 use datafusion::datasource::TableProvider;
-use moka::Expiry;
-use moka::future::Cache;
+use object_store_unity::UnityStoreFactory;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tracing::{Level, error, instrument};
+use tracing::{Level, error};
 
 use super::models::{
     GetTableResponse, ListCatalogsResponse, ListSchemasResponse, ListTableSummariesResponse, Table,
-    TableTempCredentialsResponse, TableType, TemporaryTableCredentials,
+    TableType,
 };
 use super::{DataCatalogResult, UnityCatalog, UnityCatalogError};
-use deltalake_core::{DeltaTableBuilder, ensure_table_uri};
+use deltalake_core::{DeltaTableBuilder, Path};
+use reqwest::Url;
 
 /// In-memory list of catalogs populated by unity catalog
 #[derive(Debug)]
@@ -108,25 +106,19 @@ impl CatalogProvider for UnityCatalogProvider {
     }
 }
 
-struct TokenExpiry;
-
-impl Expiry<String, TemporaryTableCredentials> for TokenExpiry {
-    fn expire_after_read(
-        &self,
-        _key: &String,
-        value: &TemporaryTableCredentials,
-        _read_at: Instant,
-        _duration_until_expiry: Option<Duration>,
-        _last_modified_at: Instant,
-    ) -> Option<Duration> {
-        let Some(expiration_time) = value.expiration_time else {
-            tracing::info!("Token {_key} has no expiry; keeping it until evicted");
-            return None;
-        };
-        let time_to_expire = expiration_time - Utc::now();
-        tracing::info!("Token {_key} expires in {time_to_expire}");
-        time_to_expire.to_std().ok()
+/// The location the table's routes are keyed on.
+///
+/// Local paths are canonicalized, as delta-rs resolves them, so a location
+/// behind a symlink (e.g. macOS `/tmp`) still matches its route.
+fn canonical_location(url: &Url) -> Url {
+    if url.scheme() != "file" {
+        return url.clone();
     }
+    url.to_file_path()
+        .ok()
+        .and_then(|path| std::fs::canonicalize(path).ok())
+        .and_then(|path| Url::from_directory_path(path).ok())
+        .unwrap_or_else(|| url.clone())
 }
 
 /// A datafusion [`SchemaProvider`] backed by Databricks UnityCatalog
@@ -139,7 +131,7 @@ pub struct UnitySchemaProvider {
     /// Parent catalog for schemas of interest.
     table_names: Vec<String>,
     table_cache: DashMap<String, Arc<dyn TableProvider>>,
-    token_cache: Cache<String, TemporaryTableCredentials>,
+    store_factory: UnityStoreFactory,
 }
 
 impl UnitySchemaProvider {
@@ -164,55 +156,15 @@ impl UnitySchemaProvider {
                 .collect(),
             ListTableSummariesResponse::Error(_) => vec![],
         };
-        let token_cache = Cache::builder().expire_after(TokenExpiry).build();
+        let store_factory = client.store_factory()?;
         Ok(Self {
             client,
             table_names,
             catalog_name,
             schema_name,
-            token_cache,
             table_cache: DashMap::new(),
+            store_factory,
         })
-    }
-
-    #[instrument(skip_all)]
-    async fn get_creds(
-        &self,
-        catalog: &str,
-        schema: &str,
-        table: &str,
-    ) -> Result<TemporaryTableCredentials, UnityCatalogError> {
-        let full_path = format!("{}.{}.{}", catalog, schema, table);
-        if let Some(token) = self.token_cache.get(&full_path).await {
-            tracing::event!(Level::DEBUG, "Cache hit for {full_path}");
-            return Ok(token.clone());
-        } else {
-            tracing::event!(Level::DEBUG, "Fetching new credential for {full_path}");
-        }
-        match self
-            .client
-            .get_temp_table_credentials_with_permission(catalog, schema, table, "READ_WRITE")
-            .await
-        {
-            Ok(TableTempCredentialsResponse::Success(temp_creds)) => Ok(temp_creds),
-            Ok(TableTempCredentialsResponse::Error(rw_error)) => match self
-                .client
-                .get_temp_table_credentials(catalog, schema, table)
-                .await?
-            {
-                TableTempCredentialsResponse::Success(temp_creds) => Ok(temp_creds),
-                TableTempCredentialsResponse::Error(read_error) => {
-                    Err(UnityCatalogError::TemporaryCredentialsFetchFailure {
-                        error_code: read_error.error_code,
-                        message: format!(
-                            "READ_WRITE failed: {}. READ failed: {}",
-                            rw_error.message, read_error.message
-                        ),
-                    })
-                }
-            },
-            Err(err) => Err(err),
-        }
     }
 }
 
@@ -238,27 +190,26 @@ impl SchemaProvider for UnitySchemaProvider {
 
         match maybe_table {
             GetTableResponse::Success(Table {
-                storage_location: Some(sl),
+                storage_location: Some(_),
                 ..
             }) => {
                 let full_path = format!("{}.{}.{}", self.catalog_name, self.schema_name, name);
-                let temp_creds = self
-                    .token_cache
-                    .try_get_with(
-                        full_path,
-                        self.get_creds(&self.catalog_name, &self.schema_name, name),
-                    )
+                let store = crate::table_store(&self.store_factory, &full_path, None)
                     .await
-                    .map_err(|err| DataFusionError::External(err.into()))?;
+                    .map_err(|err| DataFusionError::External(Box::new(err)))?;
 
-                let new_storage_opts = temp_creds.get_credentials().ok_or_else(|| {
-                    DataFusionError::External(UnityCatalogError::MissingCredential.into())
-                })?;
-                let table_url =
-                    ensure_table_uri(&sl).map_err(|e| DataFusionError::External(Box::new(e)))?;
-                let table = DeltaTableBuilder::from_url(table_url)
+                // Every Unity Catalog table in a bucket shares one routing
+                // store as its root, so whichever instance DataFusion registers
+                // for the bucket still sends each table's requests to the store
+                // holding that table's credentials (delta-io/delta-rs#4425).
+                let location = canonical_location(store.url());
+                let prefix = Path::from_url_path(location.path())
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                let routing = self.client.routing_store(&location);
+                routing.register(prefix, store.root());
+                let table = DeltaTableBuilder::from_url(location.clone())
                     .map_err(|e| DataFusionError::External(Box::new(e)))?
-                    .with_storage_options(new_storage_opts)
+                    .with_storage_backend(routing, location)
                     .load()
                     .await?;
                 let provider = table.table_provider().await?;
@@ -283,5 +234,133 @@ impl SchemaProvider for UnitySchemaProvider {
 
     fn table_exist(&self, name: &str) -> bool {
         self.table_names.contains(&name.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datafusion::arrow::array::{Int64Array, RecordBatch};
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::prelude::SessionContext;
+    use deltalake_core::{DeltaTable, ensure_table_uri};
+    use httpmock::prelude::*;
+
+    use super::*;
+    use crate::UnityCatalogBuilder;
+    use crate::client::ClientOptions;
+
+    fn catalog(server: &MockServer) -> Arc<UnityCatalog> {
+        Arc::new(
+            UnityCatalogBuilder::builder()
+                .workspace_url(server.url(""))
+                .bearer_token("pat")
+                .client_options(ClientOptions::builder().allow_http(true).build())
+                .build()
+                .build()
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn routing_store_is_shared_per_bucket() {
+        let server = MockServer::start();
+        let uc = catalog(&server);
+        let url = |s: &str| Url::parse(s).unwrap();
+        let t1 = uc.routing_store(&url("abfss://container@account.dfs.core.windows.net/t1"));
+        let t2 = uc.routing_store(&url("abfss://container@account.dfs.core.windows.net/t2"));
+        let other = uc.routing_store(&url("abfss://other@account.dfs.core.windows.net/t1"));
+        assert!(
+            Arc::ptr_eq(&t1, &t2),
+            "tables in one container share a store"
+        );
+        assert!(!Arc::ptr_eq(&t1, &other), "containers do not");
+    }
+
+    async fn write_table(location: &str, ids: Vec<i64>) {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(ids))]).unwrap();
+        DeltaTable::try_from_url(ensure_table_uri(location).unwrap())
+            .await
+            .unwrap()
+            .write(vec![batch])
+            .await
+            .unwrap();
+    }
+
+    async fn mock_table(server: &MockServer, name: &str, location: &str) {
+        let body = serde_json::json!({
+            "name": name,
+            "catalog_name": "main",
+            "schema_name": "default",
+            "table_type": "MANAGED",
+            "data_source_format": "DELTA",
+            "columns": [],
+            "properties": {},
+            "storage_location": location,
+            "created_at": 0,
+            "updated_at": 0,
+            "table_id": format!("id-{name}"),
+        });
+        server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path(format!("/api/2.1/unity-catalog/tables/main.default.{name}"));
+                then.json_body(body);
+            })
+            .await;
+    }
+
+    /// Two tables under one storage root, queried in one session: each reads
+    /// its own data through the shared routing store (delta-io/delta-rs#4425).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tables_sharing_a_bucket_query_in_one_session() {
+        let dir = tempfile::tempdir().unwrap();
+        // Deliberately not canonicalized: on macOS the temp dir sits behind the
+        // `/var` -> `/private/var` symlink, which the routing must tolerate.
+        let root = Url::from_directory_path(dir.path()).unwrap();
+        let t1 = root.join("tables/t1/").unwrap();
+        let t2 = root.join("tables/t2/").unwrap();
+        write_table(t1.as_str(), vec![1, 2]).await;
+        write_table(t2.as_str(), vec![1, 2, 3]).await;
+
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/api/2.1/unity-catalog/table-summaries");
+                then.json_body(serde_json::json!({"tables": [
+                    {"full_name": "main.default.t1", "table_type": "MANAGED"},
+                    {"full_name": "main.default.t2", "table_type": "MANAGED"},
+                ]}));
+            })
+            .await;
+        mock_table(&server, "t1", t1.as_str()).await;
+        mock_table(&server, "t2", t2.as_str()).await;
+
+        let provider = UnitySchemaProvider::try_new(catalog(&server), "main", "default")
+            .await
+            .unwrap();
+        let ctx = SessionContext::new();
+        for name in ["t1", "t2"] {
+            let table = provider.table(name).await.unwrap().unwrap();
+            ctx.register_table(name, table).unwrap();
+        }
+
+        for (name, expected) in [("t1", 2), ("t2", 3), ("t1", 2)] {
+            let batches = ctx
+                .sql(&format!("SELECT COUNT(*) AS n FROM {name}"))
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            let count = batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0);
+            assert_eq!(count, expected, "rows in {name}");
+        }
     }
 }
