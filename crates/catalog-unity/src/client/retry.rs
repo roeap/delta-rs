@@ -108,6 +108,18 @@ impl Default for RetryConfig {
     }
 }
 
+impl From<&RetryConfig> for olai_http::RetryConfig {
+    fn from(val: &RetryConfig) -> olai_http::RetryConfig {
+        let mut retry = olai_http::RetryConfig::default();
+        retry.backoff.init_backoff = val.backoff.init_backoff;
+        retry.backoff.max_backoff = val.backoff.max_backoff;
+        retry.backoff.base = val.backoff.base;
+        retry.max_retries = val.max_retries;
+        retry.retry_timeout = val.retry_timeout;
+        retry
+    }
+}
+
 impl From<&RetryConfig> for ExponentialBackoff {
     fn from(val: &RetryConfig) -> ExponentialBackoff {
         ExponentialBackoff::builder()
