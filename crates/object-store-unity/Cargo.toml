@@ -1,0 +1,40 @@
+[package]
+name = "object_store_unity"
+version = "0.1.0"
+description = "object_store integration for Unity Catalog credential vending"
+readme = "README.md"
+keywords = ["unity-catalog", "object-store", "databricks", "credentials"]
+categories = ["filesystem"]
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+futures.workspace = true
+object_store = { workspace = true, features = ["cloud"] }
+olai-http = "0.0.8"
+percent-encoding = "2.3"
+# Same major as olai-http, whose request API returns `reqwest::Response`.
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+httpmock = "0.8.3"
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[features]
+default = ["aws", "azure", "gcp"]
+aws = ["object_store/aws"]
+azure = ["object_store/azure"]
+gcp = ["object_store/gcp"]
