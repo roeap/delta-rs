@@ -9,6 +9,7 @@ mod credential;
 mod error;
 mod models;
 mod reference;
+mod routing;
 mod store;
 
 pub use builder::{UnityConfigKey, UnityStoreFactoryBuilder};
@@ -21,4 +22,5 @@ pub use models::{
     VolumeInfo, VolumeOperation,
 };
 pub use reference::UnityReference;
+pub use routing::RoutingObjectStore;
 pub use store::{ScopedStore, UnityStoreFactory};
