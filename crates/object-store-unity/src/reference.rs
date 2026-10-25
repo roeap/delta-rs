@@ -1,38 +1,4 @@
-//! URL scheme for referencing Unity Catalog securables.
-//!
-//! Defines a single, conventional URL grammar that addresses Unity Catalog
-//! volumes, tables, and raw external paths through one parser.
-//!
-//! # Scheme
-//!
-//! | URL shape                                                  | Vending endpoint               |
-//! |------------------------------------------------------------|--------------------------------|
-//! | `uc:///Volumes/<catalog>/<schema>/<volume>[/<path>]`       | `temporary-volume-credentials` |
-//! | `uc:///Tables/<catalog>/<schema>/<table>`                  | `temporary-table-credentials`  |
-//! | `s3://`, `s3a://`, `gs://`, `abfs://`, `abfss://`, `az://`, `azure://`, `r2://` raw cloud URL | `temporary-path-credentials` |
-//!
-//! For ecosystem compatibility, the parser also accepts:
-//!
-//! - `vol+dbfs:/Volumes/<catalog>/<schema>/<volume>[/<path>]`, used by some
-//!   Databricks credential-vending samples — identical to `uc:///Volumes/...`;
-//! - `uc://<catalog>.<schema>.<table>`, the table form `deltalake` has always
-//!   accepted — identical to `uc:///Tables/<catalog>/<schema>/<table>`.
-//!
-//! ## Why the kind goes in the path
-//!
-//! The capitalised `Volumes` / `Tables` segment mirrors the Databricks
-//! workspace POSIX convention (`/Volumes/<catalog>/<schema>/<volume>/...`).
-//! It can't live in the URL authority because Unity Catalog names commonly
-//! contain underscores, which are not allowed in hostnames per RFC 1123 and
-//! which `url::Url` would silently lowercase.
-//!
-//! ## Case-insensitivity
-//!
-//! Kind segments are matched **case-insensitively**, so `/Volumes/...`,
-//! `/volumes/...`, and `/VOLUMES/...` all dispatch the same way. The
-//! capitalised form is canonical in docs because it matches the Databricks
-//! workspace path convention; the lowercase form matches the REST API.
-//! Catalog, schema, volume, and table names are passed through verbatim.
+//! URL grammar for Unity Catalog securables.
 
 use std::str::FromStr;
 
@@ -49,6 +15,37 @@ fn invalid(message: String) -> Error {
 /// Construct one via [`UnityReference::parse`] (or its [`FromStr`] impl). The
 /// variants map 1:1 to the three credential-vending endpoints exposed by
 /// Unity Catalog.
+///
+/// # Scheme
+///
+/// | URL shape                                                  | Vending endpoint               |
+/// |------------------------------------------------------------|--------------------------------|
+/// | `uc:///Volumes/<catalog>/<schema>/<volume>[/<path>]`       | `temporary-volume-credentials` |
+/// | `uc:///Tables/<catalog>/<schema>/<table>`                  | `temporary-table-credentials`  |
+/// | `s3://`, `s3a://`, `gs://`, `abfs://`, `abfss://`, `az://`, `azure://`, `r2://` raw cloud URL | `temporary-path-credentials` |
+///
+/// For ecosystem compatibility, the parser also accepts:
+///
+/// - `vol+dbfs:/Volumes/<catalog>/<schema>/<volume>[/<path>]`, used by some
+///   Databricks credential-vending samples — identical to `uc:///Volumes/...`;
+/// - `uc://<catalog>.<schema>.<table>`, the table form `deltalake` has always
+///   accepted — identical to `uc:///Tables/<catalog>/<schema>/<table>`.
+///
+/// ## Why the kind goes in the path
+///
+/// The capitalised `Volumes` / `Tables` segment mirrors the Databricks
+/// workspace POSIX convention (`/Volumes/<catalog>/<schema>/<volume>/...`).
+/// Names stay out of the URL authority because Unity Catalog names commonly
+/// contain underscores, which hostnames do not allow (RFC 1123). The legacy
+/// dotted form is therefore parsed from the raw string.
+///
+/// ## Case-insensitivity
+///
+/// Kind segments are matched **case-insensitively**, so `/Volumes/...`,
+/// `/volumes/...`, and `/VOLUMES/...` all dispatch the same way. The
+/// capitalised form is canonical in docs because it matches the Databricks
+/// workspace path convention; the lowercase form matches the REST API.
+/// Catalog, schema, volume, and table names are passed through verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnityReference {
     /// A Unity Catalog volume, with an optional sub-path inside the volume.
@@ -81,7 +78,7 @@ pub enum UnityReference {
 impl UnityReference {
     /// Parse a URL string into a [`UnityReference`].
     ///
-    /// See the [module-level documentation](self) for the supported shapes.
+    /// See the [type-level documentation](UnityReference) for the supported shapes.
     pub fn parse(input: &str) -> Result<Self> {
         // Handle the `vol+dbfs:` alias before passing through to `url::Url`,
         // because `vol+dbfs:/Volumes/...` is path-only (no authority) and we
