@@ -12,8 +12,8 @@ takes an `Arc<dyn ObjectStore>` — and refreshes them before they expire.
 use object_store::ObjectStoreExt;
 use object_store_unity::{Operation, UnityStoreFactoryBuilder};
 
-// DATABRICKS_HOST plus any Databricks auth: a token, OAuth M2M, OIDC,
-// or a ~/.databrickscfg profile.
+// UNITY_CATALOG_URL plus UNITY_* auth — or, on Databricks, DATABRICKS_HOST
+// plus any Databricks auth or ~/.databrickscfg profile.
 let factory = UnityStoreFactoryBuilder::from_env().build()?;
 
 let volume = factory
@@ -41,10 +41,15 @@ let bytes = volume.as_dyn().get(&"raw/file.json".into()).await?.bytes().await?;
   Cloudflare R2, Azure (user-delegation SAS and AAD), and GCP — each behind a
   feature (`aws`, `azure`, `gcp`; all default). `file://` and Azurite locations
   work for local development.
-- **Databricks authentication** via [`olai-http`](https://docs.rs/olai-http):
-  personal access tokens, OAuth M2M, OIDC token env/file (workload identity
-  federation), Azure managed identity, GCP token exchange, and
-  `.databrickscfg` profiles.
+- **Any identity provider.** Unity Catalog runs wherever it's deployed, so
+  authentication isn't tied to Databricks: a bearer token, OAuth client
+  credentials against any IdP, Entra ID (service principal, managed or
+  workload identity, Azure CLI), GCP ID tokens, tokens from files or env
+  vars, and the RFC 8693 token exchange OSS Unity Catalog uses. Databricks
+  (PATs, OAuth M2M, OIDC, Azure, `.databrickscfg` profiles) is supported via
+  [`olai-http`](https://docs.rs/olai-http).
+- **AWS regions discovered.** Without a configured region, a bucket's region
+  comes from S3 itself (`x-amz-bucket-region`), once per bucket.
 - **One registry, many securables.** `RoutingObjectStore` serves every
   table or volume in a bucket from a single registry entry.
 - **Bring your own vending.** Implement `CredentialVendor` to back a store
@@ -57,15 +62,22 @@ let bytes = volume.as_dyn().get(&"raw/file.json".into()).await?.bytes().await?;
 lenient `with_options` that ignores keys it does not know, so a whole
 storage-options map can be passed through.
 
-| Key                              | Meaning                                              |
-|----------------------------------|------------------------------------------------------|
-| `unity_catalog_url`              | REST base URL (default `<host>/api/2.1/unity-catalog/`) |
-| `databricks_host`                | Workspace host                                       |
-| `databricks_token`               | Personal access token                                |
-| `databricks_client_id` / `_secret` | OAuth M2M service principal                        |
-| `databricks_*`                   | Any other Databricks auth or HTTP client option      |
-| `aws_region`                     | Region for vended AWS credentials                    |
-| `unity_allow_unauthenticated`    | Local development without auth                       |
+| Key | Meaning |
+|-----|---------|
+| `unity_catalog_url` | REST base URL (default `<databricks host>/api/2.1/unity-catalog/`) |
+| `unity_token` | Bearer token |
+| `unity_client_id` / `unity_client_secret` | OAuth client, Entra service principal, or user-assigned managed identity |
+| `unity_oauth_token_url` / `unity_oauth_scope` / `unity_oauth_audience` | Token endpoint, scope, and audience of your IdP |
+| `unity_azure_tenant_id` | Entra tenant |
+| `unity_token_file` / `unity_token_env` | Token read from a file or environment variable |
+| `unity_token_exchange` | `true` (server's `/api/1.0/unity-control/auth/tokens`) or an endpoint URL |
+| `unity_auth_type` | Force a flow: `bearer`, `oauth-client-credentials`, `azure-client-secret`, `azure-managed-identity`, `azure-workload-identity`, `azure-cli`, `gcp-id-token`, `token-file`, `token-env`, `databricks`, `none` |
+| `databricks_*` | Databricks authentication, or HTTP client options (`allow_http`, `timeout`, …) |
+| `aws_region` | Region of vended S3 locations (default: discovered, then `AWS_REGION`) |
+| `unity_allow_unauthenticated` | Local development without auth |
+
+Every key can also be set as an upper-case environment variable read by
+`from_env()` (`UNITY_TOKEN`, …).
 
 ## License
 

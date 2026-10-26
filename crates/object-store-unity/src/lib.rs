@@ -13,8 +13,8 @@
 //! use object_store_unity::{Operation, UnityStoreFactoryBuilder};
 //!
 //! # async fn run() -> object_store_unity::Result<()> {
-//! // `DATABRICKS_HOST` plus any Databricks auth: a token, OAuth, OIDC, or a
-//! // `~/.databrickscfg` profile.
+//! // `UNITY_CATALOG_URL` plus `UNITY_*` auth (see below) — or, on Databricks,
+//! // `DATABRICKS_HOST` plus any Databricks auth or `~/.databrickscfg` profile.
 //! let factory = UnityStoreFactoryBuilder::from_env().build()?;
 //!
 //! let volume = factory
@@ -40,6 +40,26 @@
 //! [`for_volume`](UnityStoreFactory::for_volume) and
 //! [`for_path`](UnityStoreFactory::for_path) take the per-endpoint operation
 //! instead of the unified [`Operation`].
+//!
+//! # Authentication
+//!
+//! Unity Catalog runs wherever it is deployed, behind whatever identity
+//! provider the deployment uses. [`UnityStoreFactoryBuilder`] authenticates
+//! with any of these ([`UnityAuthType`]), configured through `unity_*` keys:
+//!
+//! | Deployment | Configuration |
+//! |------------|---------------|
+//! | A token you already have | `unity_token` |
+//! | OSS Unity Catalog behind an IdP: exchange an ID token for a UC token | `unity_token_file` / `unity_token_env` (or an identity flow below) + `unity_token_exchange=true` |
+//! | Any OAuth 2.0 IdP (Okta, Keycloak, Cognito, Entra, …) | `unity_client_id` + `unity_client_secret` + `unity_oauth_token_url`, optional `unity_oauth_scope` / `unity_oauth_audience` |
+//! | Entra ID service principal | `unity_client_id` + `unity_client_secret` + `unity_azure_tenant_id` + `unity_oauth_scope` |
+//! | Azure managed / workload identity, Azure CLI | `unity_auth_type=azure-managed-identity` / `azure-workload-identity` / `azure-cli` + `unity_oauth_scope` |
+//! | GCP service account (ID token) | `unity_auth_type=gcp-id-token`, optional `unity_oauth_audience` |
+//! | Databricks | `databricks_*` options, `DATABRICKS_*` variables, or a `.databrickscfg` profile |
+//! | Local development | `unity_allow_unauthenticated=true` |
+//!
+//! Explicit `unity_*` configuration wins over Databricks; see
+//! [`UnityAuthType`] for the detection order.
 //!
 //! # Credential lifecycle
 //!
@@ -73,7 +93,8 @@
 //! # Features
 //!
 //! `aws` (also Cloudflare R2), `azure`, and `gcp` enable the respective
-//! stores; all are on by default. A credential for a disabled cloud is an
+//! stores; all are on by default. Without a configured `aws_region`, the
+//! region of a vended S3 bucket is discovered from the bucket itself. A credential for a disabled cloud is an
 //! [`Error::FeatureDisabled`].
 //!
 //! [Unity Catalog]: https://www.unitycatalog.io/
