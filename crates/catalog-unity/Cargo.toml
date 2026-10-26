@@ -28,6 +28,7 @@ deltalake-aws = { version = "2.0", path = "../aws", optional = true }
 deltalake-azure = { version = "2.0", path = "../azure", optional = true }
 deltalake-gcp = { version = "2.0", path = "../gcp", optional = true }
 olai-http = "0.0.8"
+object_store_unity = { version = "0.1", path = "../object-store-unity", default-features = false }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "http2"] }
 reqwest-retry = "0.9"
 reqwest-middleware = { version = "0.5", features = ["json", "query", "form"] }
@@ -48,10 +49,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 default = ["datafusion", "aws", "rustls"]
 native-tls = ["deltalake-core/native-tls"]
 rustls = ["deltalake-core/rustls"]
-aws = ["deltalake-aws"]
-azure = ["deltalake-azure"]
-gcp = ["deltalake-gcp"]
-r2 = ["deltalake-aws"]
+aws = ["deltalake-aws", "object_store_unity/aws"]
+azure = ["deltalake-azure", "object_store_unity/azure"]
+gcp = ["deltalake-gcp", "object_store_unity/gcp"]
+r2 = ["deltalake-aws", "object_store_unity/aws"]
 datafusion = ["dep:datafusion", "deltalake-core/datafusion", "moka"]
 
 [[example]]

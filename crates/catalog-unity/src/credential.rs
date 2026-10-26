@@ -1,7 +1,8 @@
 //! Authorization credentials
 //!
-//! Unity Catalog requests are authenticated by `olai_http`'s Databricks
-//! credential chain, configured through [`UnityCatalogBuilder`]. The providers
+//! Unity Catalog requests are authenticated by `object_store_unity`, which
+//! supports Databricks and any other identity provider, configured through
+//! [`UnityCatalogBuilder`]. The providers
 //! in this module are no longer used and will be removed; [`TokenCredential`]
 //! remains the way to plug in a custom token source.
 //!
