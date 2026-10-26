@@ -88,7 +88,7 @@ mod reference;
 mod routing;
 mod store;
 
-pub use builder::{UnityConfigKey, UnityStoreFactoryBuilder};
+pub use builder::{UnityAuthType, UnityConfigKey, UnityStoreFactoryBuilder};
 pub use client::UnityClient;
 pub use credential::CredentialVendor;
 pub use error::{Error, Result};

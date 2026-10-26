@@ -852,6 +852,130 @@ mod tests {
         vend.assert_async().await;
     }
 
+    async fn mock_vend<'a>(server: &'a MockServer, bearer: &str) -> httpmock::Mock<'a> {
+        let bearer = format!("Bearer {bearer}");
+        server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path(format!("{API}/temporary-path-credentials"))
+                    .header("authorization", bearer);
+                then.status(200)
+                    .json_body(aws_credentials("s3://bucket/p/"));
+            })
+            .await
+    }
+
+    async fn vend_through(factory: UnityStoreFactory) {
+        let url = Url::parse("s3://bucket/p/").unwrap();
+        factory.for_path(&url, PathOperation::Read).await.unwrap();
+    }
+
+    /// OSS Unity Catalog: a token file (e.g. a projected service-account
+    /// token) is exchanged at the server's token endpoint, and the issued
+    /// token signs the vend.
+    #[tokio::test]
+    async fn token_file_is_exchanged_for_a_unity_catalog_token() {
+        let server = MockServer::start_async().await;
+        let dir = tempfile::tempdir().unwrap();
+        let token_file = dir.path().join("token");
+        std::fs::write(&token_file, "idp-id-token").unwrap();
+        let exchange = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/api/1.0/unity-control/auth/tokens")
+                    .form_urlencoded_tuple(
+                        "grant_type",
+                        "urn:ietf:params:oauth:grant-type:token-exchange",
+                    )
+                    .form_urlencoded_tuple("subject_token", "idp-id-token")
+                    .form_urlencoded_tuple(
+                        "subject_token_type",
+                        "urn:ietf:params:oauth:token-type:id_token",
+                    );
+                then.json_body(json!({"access_token": "uc-token", "expires_in": 3600}));
+            })
+            .await;
+        let vend = mock_vend(&server, "uc-token").await;
+
+        let factory = UnityStoreFactory::builder()
+            .with_url(server.url(API))
+            .with_aws_region("us-east-1")
+            .with_options([
+                ("unity_token_file", token_file.to_string_lossy().as_ref()),
+                ("unity_token_exchange", "true"),
+            ])
+            .build()
+            .unwrap();
+        vend_through(factory).await;
+        exchange.assert_async().await;
+        vend.assert_async().await;
+    }
+
+    /// Client credentials against the deployment's own identity provider.
+    #[tokio::test]
+    async fn client_credentials_against_any_identity_provider() {
+        let server = MockServer::start_async().await;
+        let token = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/idp/oauth2/token")
+                    .form_urlencoded_tuple("client_id", "app")
+                    .form_urlencoded_tuple("scope", "catalog");
+                then.json_body(json!({"access_token": "idp-token", "expires_in": 3600}));
+            })
+            .await;
+        let vend = mock_vend(&server, "idp-token").await;
+
+        let factory = UnityStoreFactory::builder()
+            .with_url(server.url(API))
+            .with_aws_region("us-east-1")
+            .with_options([
+                ("unity_client_id", "app"),
+                ("unity_client_secret", "secret"),
+                (
+                    "unity_oauth_token_url",
+                    server.url("/idp/oauth2/token").as_str(),
+                ),
+                ("unity_oauth_scope", "catalog"),
+            ])
+            .build()
+            .unwrap();
+        vend_through(factory).await;
+        token.assert_async().await;
+        vend.assert_async().await;
+    }
+
+    /// An Azure service principal for the deployment's own Entra app.
+    #[tokio::test]
+    async fn azure_service_principal_for_a_custom_scope() {
+        let server = MockServer::start_async().await;
+        let aad = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/tenant-1/oauth2/v2.0/token")
+                    .form_urlencoded_tuple("scope", "api://my-catalog/.default");
+                then.json_body(json!({"access_token": "aad-token", "expires_in": 3600}));
+            })
+            .await;
+        let vend = mock_vend(&server, "aad-token").await;
+
+        let factory = UnityStoreFactory::builder()
+            .with_url(server.url(API))
+            .with_aws_region("us-east-1")
+            .with_options([
+                ("unity_client_id", "app"),
+                ("unity_client_secret", "secret"),
+                ("unity_azure_tenant_id", "tenant-1"),
+                ("unity_azure_authority_host", server.base_url().as_str()),
+                ("unity_oauth_scope", "api://my-catalog/.default"),
+            ])
+            .build()
+            .unwrap();
+        vend_through(factory).await;
+        aad.assert_async().await;
+        vend.assert_async().await;
+    }
+
     #[test]
     fn s3_builder_maps_r2_locations() {
         use object_store::aws::AmazonS3ConfigKey;
