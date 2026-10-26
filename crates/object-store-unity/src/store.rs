@@ -1169,6 +1169,70 @@ mod tests {
         vend.assert_async().await;
     }
 
+    #[tokio::test]
+    async fn well_known_azure_service_principal_keys() {
+        let server = MockServer::start_async().await;
+        let aad = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/tenant-1/oauth2/v2.0/token")
+                    .form_urlencoded_tuple("client_id", "deployment-app")
+                    .form_urlencoded_tuple("scope", "api://my-catalog/.default");
+                then.json_body(json!({"access_token": "aad-token", "expires_in": 3600}));
+            })
+            .await;
+        let vend = mock_vend(&server, "aad-token").await;
+
+        let factory = UnityStoreFactory::builder()
+            .with_url(server.url(API))
+            .with_aws_region("us-east-1")
+            .with_options([
+                ("azure_client_id", "deployment-app"),
+                ("azure_client_secret", "secret"),
+                ("azure_tenant_id", "tenant-1"),
+                ("azure_authority_host", server.base_url().as_str()),
+                ("unity_oauth_scope", "api://my-catalog/.default"),
+            ])
+            .build()
+            .unwrap();
+        vend_through(factory).await;
+        aad.assert_async().await;
+        vend.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn well_known_azure_managed_identity_keys() {
+        let server = MockServer::start_async().await;
+        let imds = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/msi/token")
+                    .query_param("resource", "api://my-catalog")
+                    .query_param("client_id", "uami");
+                then.json_body(json!({
+                    "access_token": "msi-token",
+                    "expires_in": "3600",
+                    "expires_on": "4102444800",
+                }));
+            })
+            .await;
+        let vend = mock_vend(&server, "msi-token").await;
+
+        let factory = UnityStoreFactory::builder()
+            .with_url(server.url(API))
+            .with_aws_region("us-east-1")
+            .with_options([
+                ("azure_client_id", "uami"),
+                ("azure_msi_endpoint", server.url("/msi/token").as_str()),
+                ("unity_oauth_scope", "api://my-catalog/.default"),
+            ])
+            .build()
+            .unwrap();
+        vend_through(factory).await;
+        imds.assert_async().await;
+        vend.assert_async().await;
+    }
+
     #[test]
     fn s3_builder_maps_r2_locations() {
         use object_store::aws::AmazonS3ConfigKey;

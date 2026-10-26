@@ -3,8 +3,11 @@
 use std::fmt;
 use std::str::FromStr;
 
+use std::collections::HashMap;
+
 use olai_http::bearer::{
-    AzureManagedIdentity, BearerAuth, BearerCredentialProvider, ClientCredentials, TokenExchange,
+    AzureManagedIdentity, BearerAuth, BearerCredentialProvider, ClientCredentials,
+    GcpServiceAccount, TokenExchange,
 };
 use olai_http::databricks::{DatabricksBuilder, DatabricksConfigKey};
 use olai_http::{ClientConfigKey, ClientOptions, CloudClient, RetryConfig};
@@ -20,6 +23,24 @@ const UNITY_CATALOG_API_PATH: &str = "api/2.1/unity-catalog/";
 
 /// The OSS Unity Catalog token-exchange endpoint below the server root.
 const UNITY_TOKEN_EXCHANGE_PATH: &str = "api/1.0/unity-control/auth/tokens";
+
+/// The Azure AD scope of Azure Databricks.
+const AZURE_DATABRICKS_SCOPE: &str = "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default";
+
+/// Domains of Azure Databricks workspaces.
+const AZURE_DATABRICKS_DOMAINS: &[&str] = &[
+    "azuredatabricks.net",
+    "databricks.azure.cn",
+    "databricks.azure.us",
+];
+
+/// Domains of Databricks workspaces on AWS and GCP.
+const DATABRICKS_DOMAINS: &[&str] = &[
+    "cloud.databricks.com",
+    "cloud.databricks.us",
+    "cloud.databricks.mil",
+    "gcp.databricks.com",
+];
 
 /// Configuration keys for [`UnityStoreFactoryBuilder`].
 ///
@@ -125,6 +146,12 @@ pub enum UnityConfigKey {
     /// Supported keys: `unity_token_exchange_subject_token_type`.
     TokenExchangeSubjectTokenType,
 
+    /// A well-known Azure identity option; see [`AzureIdentityKey`].
+    Azure(AzureIdentityKey),
+
+    /// A well-known Google identity option; see [`GoogleIdentityKey`].
+    Google(GoogleIdentityKey),
+
     /// A Databricks authentication or HTTP client option, resolved by
     /// [`olai_http`]'s Databricks credential chain: `databricks_host`,
     /// `databricks_token`, `databricks_client_id` + `databricks_client_secret`,
@@ -154,6 +181,8 @@ impl AsRef<str> for UnityConfigKey {
             Self::TokenEnv => "unity_token_env",
             Self::TokenExchange => "unity_token_exchange",
             Self::TokenExchangeSubjectTokenType => "unity_token_exchange_subject_token_type",
+            Self::Azure(key) => key.as_ref(),
+            Self::Google(key) => key.as_ref(),
             Self::Databricks(key) => key.as_ref(),
         }
     }
@@ -182,23 +211,189 @@ impl FromStr for UnityConfigKey {
             "unity_token_exchange_subject_token_type" => Ok(Self::TokenExchangeSubjectTokenType),
             _ => s
                 .parse()
-                .map(Self::Databricks)
+                .map(Self::Azure)
+                .or_else(|_| s.parse().map(Self::Google))
+                .or_else(|_| s.parse().map(Self::Databricks))
                 .map_err(|_| Error::UnknownConfigurationKey(s.to_string())),
+        }
+    }
+}
+
+/// A well-known Azure identity option, named as `object_store`'s
+/// `MicrosoftAzureBuilder` names it.
+///
+/// These describe the identity a deployment provisions for its workloads, and
+/// are used when no Unity-specific credentials are set; see [`UnityAuthType`].
+/// [`UnityStoreFactoryBuilder::from_env`] reads them from the matching
+/// `AZURE_*` variables (and `IDENTITY_ENDPOINT`). Unprefixed aliases such as
+/// `client_id` are not accepted: they are ambiguous in an options map shared
+/// with other stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AzureIdentityKey {
+    /// The client id of a service principal, a workload identity, or a
+    /// user-assigned managed identity.
+    ///
+    /// Supported keys: `azure_client_id`, `azure_storage_client_id`.
+    ClientId,
+
+    /// The client secret of a service principal.
+    ///
+    /// Supported keys: `azure_client_secret`, `azure_storage_client_secret`.
+    ClientSecret,
+
+    /// The Azure AD tenant.
+    ///
+    /// Supported keys: `azure_tenant_id`, `azure_authority_id`,
+    /// `azure_storage_tenant_id`, `azure_storage_authority_id`.
+    TenantId,
+
+    /// The Azure AD authority host; defaults to the public cloud.
+    ///
+    /// Supported keys: `azure_authority_host`, `azure_storage_authority_host`.
+    AuthorityHost,
+
+    /// The federated token file of a workload identity.
+    ///
+    /// Supported keys: `azure_federated_token_file`.
+    FederatedTokenFile,
+
+    /// The managed-identity token endpoint.
+    ///
+    /// Supported keys: `azure_msi_endpoint`, `azure_identity_endpoint`.
+    MsiEndpoint,
+
+    /// The object id of a user-assigned managed identity.
+    ///
+    /// Supported keys: `azure_object_id`.
+    ObjectId,
+
+    /// The Azure resource id of a user-assigned managed identity.
+    ///
+    /// Supported keys: `azure_msi_resource_id`.
+    MsiResourceId,
+
+    /// Use the signed-in Azure CLI.
+    ///
+    /// Supported keys: `azure_use_azure_cli`.
+    UseAzureCli,
+}
+
+impl AsRef<str> for AzureIdentityKey {
+    fn as_ref(&self) -> &str {
+        match self {
+            Self::ClientId => "azure_client_id",
+            Self::ClientSecret => "azure_client_secret",
+            Self::TenantId => "azure_tenant_id",
+            Self::AuthorityHost => "azure_authority_host",
+            Self::FederatedTokenFile => "azure_federated_token_file",
+            Self::MsiEndpoint => "azure_msi_endpoint",
+            Self::ObjectId => "azure_object_id",
+            Self::MsiResourceId => "azure_msi_resource_id",
+            Self::UseAzureCli => "azure_use_azure_cli",
+        }
+    }
+}
+
+impl FromStr for AzureIdentityKey {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "azure_client_id" | "azure_storage_client_id" => Ok(Self::ClientId),
+            "azure_client_secret" | "azure_storage_client_secret" => Ok(Self::ClientSecret),
+            "azure_tenant_id"
+            | "azure_authority_id"
+            | "azure_storage_tenant_id"
+            | "azure_storage_authority_id" => Ok(Self::TenantId),
+            "azure_authority_host" | "azure_storage_authority_host" => Ok(Self::AuthorityHost),
+            "azure_federated_token_file" => Ok(Self::FederatedTokenFile),
+            "azure_msi_endpoint" | "azure_identity_endpoint" => Ok(Self::MsiEndpoint),
+            "azure_object_id" => Ok(Self::ObjectId),
+            "azure_msi_resource_id" => Ok(Self::MsiResourceId),
+            "azure_use_azure_cli" => Ok(Self::UseAzureCli),
+            _ => Err(Error::UnknownConfigurationKey(s.to_string())),
+        }
+    }
+}
+
+/// A well-known Google identity option, named as `object_store`'s
+/// `GoogleCloudStorageBuilder` names it.
+///
+/// A service-account key mints Google ID tokens for the Unity Catalog
+/// audience; see [`UnityAuthType::GcpIdToken`].
+/// [`UnityStoreFactoryBuilder::from_env`] reads them from the matching
+/// `GOOGLE_*` variables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum GoogleIdentityKey {
+    /// The path of a service-account key file.
+    ///
+    /// Supported keys: `google_service_account`, `google_service_account_path`.
+    ServiceAccount,
+
+    /// A service-account key, as JSON.
+    ///
+    /// Supported keys: `google_service_account_key`.
+    ServiceAccountKey,
+
+    /// The path of an application-default credentials file, which must hold
+    /// a service-account key.
+    ///
+    /// Supported keys: `google_application_credentials`.
+    ApplicationCredentials,
+}
+
+impl AsRef<str> for GoogleIdentityKey {
+    fn as_ref(&self) -> &str {
+        match self {
+            Self::ServiceAccount => "google_service_account",
+            Self::ServiceAccountKey => "google_service_account_key",
+            Self::ApplicationCredentials => "google_application_credentials",
+        }
+    }
+}
+
+impl FromStr for GoogleIdentityKey {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "google_service_account" | "google_service_account_path" => Ok(Self::ServiceAccount),
+            "google_service_account_key" => Ok(Self::ServiceAccountKey),
+            "google_application_credentials" => Ok(Self::ApplicationCredentials),
+            _ => Err(Error::UnknownConfigurationKey(s.to_string())),
         }
     }
 }
 
 /// How [`UnityStoreFactoryBuilder`] authenticates to Unity Catalog.
 ///
-/// Set it with [`UnityConfigKey::AuthType`] (string form in parentheses). When
-/// unset, the first match wins: a token (`bearer`); a client id + secret with
-/// a token URL (`oauth-client-credentials`) or an Azure tenant
-/// (`azure-client-secret`); a token file (`token-file`) or variable
-/// (`token-env`); Databricks options, environment, or profile
-/// (`databricks`); otherwise unauthenticated if allowed (`none`).
+/// Set it with [`UnityConfigKey::AuthType`] (string form in parentheses).
+/// When unset, it is detected from the configuration, most specific first:
 ///
-/// The Azure, GCP and ambient flows are only used when selected, as they need
-/// the scope or audience of your deployment.
+/// 1. Unity-specific credentials: a token (`bearer`); a client id + secret
+///    with a token URL (`oauth-client-credentials`) or an Azure tenant
+///    (`azure-client-secret`); a token file (`token-file`) or variable
+///    (`token-env`).
+/// 2. Databricks options, or — for a Databricks workspace — the Databricks
+///    environment or profile (`databricks`).
+/// 3. The deployment's cloud identity, from the well-known
+///    [`AzureIdentityKey`]s and [`GoogleIdentityKey`]s: an Azure service
+///    principal, workload identity, the Azure CLI, or a managed identity; a
+///    Google service account (`gcp-id-token`). Only used once the identity
+///    can be scoped to Unity Catalog — an Azure scope
+///    ([`UnityConfigKey::OAuthScope`], known for Azure Databricks) or a
+///    Google audience ([`UnityConfigKey::OAuthAudience`]) — so an identity
+///    provisioned for other services is not sent to an arbitrary server.
+/// 4. Unauthenticated, if allowed (`none`).
+///
+/// Values resolve the same way: a `unity_*` key wins over its well-known
+/// counterpart, e.g. `unity_azure_tenant_id` over `azure_tenant_id`. A
+/// client id and secret are taken as a pair, never one from each.
+///
+/// An identity without configuration — a system-assigned managed identity, or
+/// the GCP metadata server — is only used when selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum UnityAuthType {
@@ -219,7 +414,9 @@ pub enum UnityAuthType {
     AzureWorkloadIdentity,
     /// The signed-in Azure CLI (`azure-cli`): scope.
     AzureCli,
-    /// A GCP metadata-server ID token (`gcp-id-token`): audience.
+    /// A Google ID token (`gcp-id-token`) for the audience (defaults to the
+    /// origin of the Unity Catalog URL), from a service-account key if one is
+    /// configured, else from the metadata server.
     GcpIdToken,
     /// A token read from a file (`token-file`).
     TokenFile,
@@ -292,6 +489,8 @@ pub struct UnityStoreFactoryBuilder {
     token_env: Option<String>,
     token_exchange: Option<String>,
     token_exchange_subject_token_type: Option<String>,
+    azure: HashMap<AzureIdentityKey, String>,
+    google: HashMap<GoogleIdentityKey, String>,
     databricks: Vec<(DatabricksConfigKey, String)>,
     databricks_from_env: bool,
     client_options: ClientOptions,
@@ -309,21 +508,35 @@ impl UnityStoreFactoryBuilder {
     /// Create a builder configured from the environment.
     ///
     /// Variables named after a [`UnityConfigKey`] (`UNITY_CATALOG_URL`,
-    /// `UNITY_TOKEN`, `UNITY_CLIENT_ID`, …) are applied as configuration.
-    /// When they configure no authentication, the Databricks credential chain
-    /// is tried next: `DATABRICKS_*` variables and, beneath them, the selected
+    /// `UNITY_TOKEN`, `UNITY_CLIENT_ID`, …), an [`AzureIdentityKey`]
+    /// (`AZURE_CLIENT_ID`, `AZURE_FEDERATED_TOKEN_FILE`, …, and
+    /// `IDENTITY_ENDPOINT`) or a [`GoogleIdentityKey`]
+    /// (`GOOGLE_APPLICATION_CREDENTIALS`, …) are applied as configuration.
+    /// For a Databricks workspace, the Databricks credential chain also reads
+    /// `DATABRICKS_*` variables and, beneath them, the selected
     /// `.databrickscfg` profile. Without an explicit URL, it is derived from
     /// `DATABRICKS_HOST`.
+    ///
+    /// Options set afterwards take precedence over the environment.
     pub fn from_env() -> Self {
         let mut builder = Self {
             databricks_from_env: true,
             ..Self::default()
         };
         for (name, value) in std::env::vars() {
-            if !name.starts_with("UNITY_") {
-                continue;
-            }
-            if let Ok(key) = name.to_ascii_lowercase().parse() {
+            let lower = name.to_ascii_lowercase();
+            let key = if name == "IDENTITY_ENDPOINT" {
+                Some(UnityConfigKey::Azure(AzureIdentityKey::MsiEndpoint))
+            } else if name.starts_with("UNITY_") {
+                lower.parse().ok()
+            } else if name.starts_with("AZURE_") {
+                lower.parse().ok().map(UnityConfigKey::Azure)
+            } else if name.starts_with("GOOGLE_") {
+                lower.parse().ok().map(UnityConfigKey::Google)
+            } else {
+                None
+            };
+            if let Some(key) = key {
                 builder = builder.with_config(key, value);
             }
         }
@@ -416,6 +629,12 @@ impl UnityStoreFactoryBuilder {
             UnityConfigKey::TokenExchangeSubjectTokenType => {
                 self.token_exchange_subject_token_type = Some(value)
             }
+            UnityConfigKey::Azure(key) => {
+                self.azure.insert(key, value);
+            }
+            UnityConfigKey::Google(key) => {
+                self.google.insert(key, value);
+            }
             UnityConfigKey::Databricks(key) => {
                 self.databricks.retain(|(existing, _)| existing != &key);
                 self.databricks.push((key, value));
@@ -466,6 +685,8 @@ impl UnityStoreFactoryBuilder {
             UnityConfigKey::TokenExchangeSubjectTokenType => {
                 &self.token_exchange_subject_token_type
             }
+            UnityConfigKey::Azure(key) => return self.azure.get(key).cloned(),
+            UnityConfigKey::Google(key) => return self.google.get(key).cloned(),
             UnityConfigKey::Databricks(key) => {
                 return self.databricks_value(*key).map(str::to_string);
             }
@@ -565,7 +786,9 @@ impl UnityStoreFactoryBuilder {
                         "no Unity Catalog credentials configured: set `unity_token`, \
                          `unity_client_id` + `unity_client_secret` (with `unity_oauth_token_url` \
                          or `unity_azure_tenant_id`), `unity_token_file`, `unity_auth_type`, \
-                         Databricks credentials, or `unity_allow_unauthenticated`"
+                         Databricks credentials, an Azure or Google identity with \
+                         `unity_oauth_scope` or `unity_oauth_audience`, or \
+                         `unity_allow_unauthenticated`"
                             .to_string(),
                     ));
                 }
@@ -613,14 +836,15 @@ impl UnityStoreFactoryBuilder {
         }
     }
 
-    /// The authentication type implied by the configuration, if any.
+    /// The authentication type implied by the configuration, if any; see
+    /// [`UnityAuthType`] for the order.
     fn detect_auth_type(&self, url: &Url) -> Option<UnityAuthType> {
         let has_client = self.client_id.is_some() && self.client_secret.is_some();
         if self.token.is_some() {
             Some(UnityAuthType::Bearer)
         } else if has_client && self.oauth_token_url.is_some() {
             Some(UnityAuthType::OAuthClientCredentials)
-        } else if has_client && self.azure_tenant_id.is_some() {
+        } else if has_client && self.tenant_id().is_some() {
             Some(UnityAuthType::AzureClientSecret)
         } else if self.token_file.is_some() {
             Some(UnityAuthType::TokenFile)
@@ -629,12 +853,46 @@ impl UnityStoreFactoryBuilder {
         } else if self.databricks_configured(url) {
             Some(UnityAuthType::Databricks)
         } else {
-            None
+            self.detect_cloud_identity(url)
         }
     }
 
-    /// Whether Databricks credentials are configured: explicitly, or — from
-    /// the environment — through `DATABRICKS_*` variables or a profile.
+    /// The deployment's Azure or Google identity, once it can be scoped to
+    /// Unity Catalog.
+    fn detect_cloud_identity(&self, url: &Url) -> Option<UnityAuthType> {
+        use AzureIdentityKey as Azure;
+
+        if self.oauth_scope(url).is_some() {
+            let client_id = self.client_id().is_some();
+            let tenant_id = self.tenant_id().is_some();
+            if client_id && tenant_id && self.client_secret().is_some() {
+                return Some(UnityAuthType::AzureClientSecret);
+            }
+            if client_id && tenant_id && self.azure.contains_key(&Azure::FederatedTokenFile) {
+                return Some(UnityAuthType::AzureWorkloadIdentity);
+            }
+            if self
+                .azure
+                .get(&Azure::UseAzureCli)
+                .is_some_and(|value| str_is_truthy(value))
+            {
+                return Some(UnityAuthType::AzureCli);
+            }
+            let user_assigned = [Azure::ObjectId, Azure::MsiResourceId, Azure::MsiEndpoint]
+                .iter()
+                .any(|key| self.azure.contains_key(key));
+            if client_id || user_assigned {
+                return Some(UnityAuthType::AzureManagedIdentity);
+            }
+        }
+        if self.oauth_audience.is_some() && !self.google.is_empty() {
+            return Some(UnityAuthType::GcpIdToken);
+        }
+        None
+    }
+
+    /// Whether Databricks credentials are configured: explicitly, or — for a
+    /// Databricks workspace — through `DATABRICKS_*` variables or a profile.
     fn databricks_configured(&self, url: &Url) -> bool {
         let explicit = self.databricks.iter().any(|(key, _)| {
             !matches!(
@@ -642,7 +900,65 @@ impl UnityStoreFactoryBuilder {
                 DatabricksConfigKey::Client(_) | DatabricksConfigKey::Host
             )
         });
-        explicit || (self.databricks_from_env && self.databricks_client(url).is_ok())
+        explicit
+            || (self.databricks_from_env
+                && self.databricks_target(url)
+                && self.databricks_client(url).is_ok())
+    }
+
+    /// Whether Unity Catalog is served by a Databricks workspace.
+    ///
+    /// The Databricks environment is only consulted for one, as the chain
+    /// also reacts to variables of other services, such as
+    /// `GOOGLE_APPLICATION_CREDENTIALS`.
+    fn databricks_target(&self, url: &Url) -> bool {
+        self.databricks_value(DatabricksConfigKey::Host).is_some()
+            || host_in(url, DATABRICKS_DOMAINS)
+            || host_in(url, AZURE_DATABRICKS_DOMAINS)
+            || (self.databricks_from_env
+                && std::env::vars().any(|(name, _)| name.starts_with("DATABRICKS_")))
+    }
+
+    /// The client id: Unity-specific, else the Azure one — unless only a
+    /// Unity-specific secret is set, which must not pair with another
+    /// identity's id.
+    fn client_id(&self) -> Option<String> {
+        self.client_id.clone().or_else(|| {
+            self.client_secret
+                .is_none()
+                .then(|| self.azure.get(&AzureIdentityKey::ClientId).cloned())
+                .flatten()
+        })
+    }
+
+    /// The client secret, paired like [`client_id`](Self::client_id).
+    fn client_secret(&self) -> Option<String> {
+        self.client_secret.clone().or_else(|| {
+            self.client_id
+                .is_none()
+                .then(|| self.azure.get(&AzureIdentityKey::ClientSecret).cloned())
+                .flatten()
+        })
+    }
+
+    fn tenant_id(&self) -> Option<String> {
+        self.azure_tenant_id
+            .clone()
+            .or_else(|| self.azure.get(&AzureIdentityKey::TenantId).cloned())
+    }
+
+    fn authority_host(&self) -> Option<String> {
+        self.azure_authority_host
+            .clone()
+            .or_else(|| self.azure.get(&AzureIdentityKey::AuthorityHost).cloned())
+    }
+
+    /// The Azure AD scope of Unity Catalog: configured, or that of Azure
+    /// Databricks for one of its workspaces.
+    fn oauth_scope(&self, url: &Url) -> Option<String> {
+        self.oauth_scope.clone().or_else(|| {
+            host_in(url, AZURE_DATABRICKS_DOMAINS).then(|| AZURE_DATABRICKS_SCOPE.to_string())
+        })
     }
 
     fn token_exchange_endpoint(&self, url: &Url) -> Result<Option<String>> {
@@ -680,78 +996,111 @@ impl UnityStoreFactoryBuilder {
         auth_type: UnityAuthType,
         url: &Url,
     ) -> Result<BearerCredentialProvider> {
-        let required = |value: &Option<String>, key: UnityConfigKey| {
-            value.clone().ok_or_else(|| {
-                Error::InvalidConfig(format!(
-                    "`unity_auth_type` `{auth_type:?}` requires `{}`",
-                    key.as_ref()
-                ))
+        let required = |value: Option<String>, keys: &[UnityConfigKey]| {
+            value.ok_or_else(|| {
+                let keys = keys
+                    .iter()
+                    .map(|key| format!("`{}`", key.as_ref()))
+                    .collect::<Vec<_>>()
+                    .join(" or ");
+                Error::InvalidConfig(format!("`unity_auth_type` `{auth_type:?}` requires {keys}"))
             })
         };
+        use AzureIdentityKey as Azure;
+        let client_id_keys = [
+            UnityConfigKey::ClientId,
+            UnityConfigKey::Azure(Azure::ClientId),
+        ];
+        let client_secret_keys = [
+            UnityConfigKey::ClientSecret,
+            UnityConfigKey::Azure(Azure::ClientSecret),
+        ];
+        let tenant_keys = [
+            UnityConfigKey::AzureTenantId,
+            UnityConfigKey::Azure(Azure::TenantId),
+        ];
+        let scope = || required(self.oauth_scope(url), &[UnityConfigKey::OAuthScope]);
+        let azure = |key| self.azure.get(&key).cloned();
+
         let provider = match auth_type {
             UnityAuthType::Bearer => {
-                BearerAuth::static_token(required(&self.token, UnityConfigKey::Token)?)
+                BearerAuth::static_token(required(self.token.clone(), &[UnityConfigKey::Token])?)
             }
             UnityAuthType::OAuthClientCredentials => {
                 auth.client_credentials(ClientCredentials {
-                    token_url: required(&self.oauth_token_url, UnityConfigKey::OAuthTokenUrl)?,
-                    client_id: required(&self.client_id, UnityConfigKey::ClientId)?,
-                    client_secret: required(&self.client_secret, UnityConfigKey::ClientSecret)?,
+                    token_url: required(
+                        self.oauth_token_url.clone(),
+                        &[UnityConfigKey::OAuthTokenUrl],
+                    )?,
+                    client_id: required(self.client_id.clone(), &[UnityConfigKey::ClientId])?,
+                    client_secret: required(
+                        self.client_secret.clone(),
+                        &[UnityConfigKey::ClientSecret],
+                    )?,
                     scope: self.oauth_scope.clone(),
                     audience: self.oauth_audience.clone(),
                 })?
             }
             UnityAuthType::AzureClientSecret => auth.azure_client_secret(
-                &required(&self.azure_tenant_id, UnityConfigKey::AzureTenantId)?,
-                required(&self.client_id, UnityConfigKey::ClientId)?,
-                required(&self.client_secret, UnityConfigKey::ClientSecret)?,
-                &required(&self.oauth_scope, UnityConfigKey::OAuthScope)?,
-                self.azure_authority_host.clone(),
+                &required(self.tenant_id(), &tenant_keys)?,
+                required(self.client_id(), &client_id_keys)?,
+                required(self.client_secret(), &client_secret_keys)?,
+                &scope()?,
+                self.authority_host(),
             )?,
             UnityAuthType::AzureManagedIdentity => {
-                let scope = required(&self.oauth_scope, UnityConfigKey::OAuthScope)?;
+                let scope = scope()?;
                 let resource = scope.strip_suffix("/.default").unwrap_or(&scope);
                 auth.azure_managed_identity(AzureManagedIdentity {
                     resource: resource.to_string(),
-                    client_id: self.client_id.clone(),
-                    ..Default::default()
+                    client_id: self.client_id(),
+                    object_id: azure(Azure::ObjectId),
+                    msi_resource_id: azure(Azure::MsiResourceId),
+                    endpoint: azure(Azure::MsiEndpoint),
                 })?
             }
-            UnityAuthType::AzureWorkloadIdentity => {
-                let token_file = match &self.token_file {
-                    Some(file) => file.clone(),
-                    None => std::env::var("AZURE_FEDERATED_TOKEN_FILE").map_err(|_| {
-                        Error::InvalidConfig(
-                            "`azure-workload-identity` requires `unity_token_file` or \
-                             AZURE_FEDERATED_TOKEN_FILE"
-                                .to_string(),
-                        )
-                    })?,
-                };
-                auth.azure_workload_identity(
-                    &required(&self.azure_tenant_id, UnityConfigKey::AzureTenantId)?,
-                    required(&self.client_id, UnityConfigKey::ClientId)?,
-                    token_file,
-                    &required(&self.oauth_scope, UnityConfigKey::OAuthScope)?,
-                    self.azure_authority_host.clone(),
-                )?
-            }
-            UnityAuthType::AzureCli => {
-                auth.azure_cli(required(&self.oauth_scope, UnityConfigKey::OAuthScope)?)
-            }
+            UnityAuthType::AzureWorkloadIdentity => auth.azure_workload_identity(
+                &required(self.tenant_id(), &tenant_keys)?,
+                required(self.client_id(), &client_id_keys)?,
+                required(
+                    self.token_file
+                        .clone()
+                        .or_else(|| azure(Azure::FederatedTokenFile)),
+                    &[
+                        UnityConfigKey::TokenFile,
+                        UnityConfigKey::Azure(Azure::FederatedTokenFile),
+                    ],
+                )?,
+                &scope()?,
+                self.authority_host(),
+            )?,
+            UnityAuthType::AzureCli => auth.azure_cli(scope()?),
             UnityAuthType::GcpIdToken => {
                 let audience = self
                     .oauth_audience
                     .clone()
                     .unwrap_or_else(|| url.origin().ascii_serialization());
-                auth.gcp_id_token(audience, None)?
+                let google = |key| self.google.get(&key).cloned();
+                let account = google(GoogleIdentityKey::ServiceAccountKey)
+                    .map(GcpServiceAccount::Key)
+                    .or_else(|| {
+                        google(GoogleIdentityKey::ServiceAccount)
+                            .or_else(|| google(GoogleIdentityKey::ApplicationCredentials))
+                            .map(GcpServiceAccount::File)
+                    });
+                match account {
+                    Some(account) => auth.gcp_service_account_id_token(account, audience)?,
+                    None => auth.gcp_id_token(audience, None)?,
+                }
             }
-            UnityAuthType::TokenFile => {
-                auth.token_file(required(&self.token_file, UnityConfigKey::TokenFile)?)
-            }
-            UnityAuthType::TokenEnv => {
-                auth.token_env(required(&self.token_env, UnityConfigKey::TokenEnv)?)
-            }
+            UnityAuthType::TokenFile => auth.token_file(required(
+                self.token_file.clone(),
+                &[UnityConfigKey::TokenFile],
+            )?),
+            UnityAuthType::TokenEnv => auth.token_env(required(
+                self.token_env.clone(),
+                &[UnityConfigKey::TokenEnv],
+            )?),
             UnityAuthType::Databricks | UnityAuthType::None => {
                 unreachable!("not a bearer flow")
             }
@@ -788,6 +1137,18 @@ impl UnityStoreFactoryBuilder {
     }
 }
 
+/// Whether the host of `url` is one of `domains` or below one.
+fn host_in(url: &Url, domains: &[&str]) -> bool {
+    url.host_str().is_some_and(|host| {
+        domains.iter().any(|domain| {
+            host == *domain
+                || host
+                    .strip_suffix(domain)
+                    .is_some_and(|prefix| prefix.ends_with('.'))
+        })
+    })
+}
+
 fn allow_http_key() -> DatabricksConfigKey {
     DatabricksConfigKey::Client(ClientConfigKey::AllowHttp)
 }
@@ -811,6 +1172,22 @@ impl fmt::Debug for UnityStoreFactoryBuilder {
             .field("token_file", &self.token_file)
             .field("token_env", &self.token_env)
             .field("token_exchange", &self.token_exchange)
+            .field(
+                "azure",
+                &self
+                    .azure
+                    .keys()
+                    .map(|key| key.as_ref())
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "google",
+                &self
+                    .google
+                    .keys()
+                    .map(|key| key.as_ref())
+                    .collect::<Vec<_>>(),
+            )
             .field(
                 "databricks",
                 &self
@@ -856,10 +1233,40 @@ mod tests {
             UnityConfigKey::TokenEnv,
             UnityConfigKey::TokenExchange,
             UnityConfigKey::TokenExchangeSubjectTokenType,
+            UnityConfigKey::Azure(AzureIdentityKey::ClientId),
+            UnityConfigKey::Azure(AzureIdentityKey::ClientSecret),
+            UnityConfigKey::Azure(AzureIdentityKey::TenantId),
+            UnityConfigKey::Azure(AzureIdentityKey::AuthorityHost),
+            UnityConfigKey::Azure(AzureIdentityKey::FederatedTokenFile),
+            UnityConfigKey::Azure(AzureIdentityKey::MsiEndpoint),
+            UnityConfigKey::Azure(AzureIdentityKey::ObjectId),
+            UnityConfigKey::Azure(AzureIdentityKey::MsiResourceId),
+            UnityConfigKey::Azure(AzureIdentityKey::UseAzureCli),
+            UnityConfigKey::Google(GoogleIdentityKey::ServiceAccount),
+            UnityConfigKey::Google(GoogleIdentityKey::ServiceAccountKey),
+            UnityConfigKey::Google(GoogleIdentityKey::ApplicationCredentials),
             UnityConfigKey::Databricks(DatabricksConfigKey::ClientId),
         ] {
             assert_eq!(key.as_ref().parse::<UnityConfigKey>().unwrap(), key);
         }
+        // object_store's prefixed aliases select the well-known identity.
+        for (alias, key) in [
+            ("azure_storage_client_id", AzureIdentityKey::ClientId),
+            ("azure_storage_tenant_id", AzureIdentityKey::TenantId),
+            ("azure_authority_id", AzureIdentityKey::TenantId),
+            ("azure_identity_endpoint", AzureIdentityKey::MsiEndpoint),
+        ] {
+            assert_eq!(
+                alias.parse::<UnityConfigKey>().unwrap(),
+                UnityConfigKey::Azure(key)
+            );
+        }
+        assert_eq!(
+            "google_service_account_path"
+                .parse::<UnityConfigKey>()
+                .unwrap(),
+            UnityConfigKey::Google(GoogleIdentityKey::ServiceAccount)
+        );
         assert_eq!(
             "token".parse::<UnityConfigKey>().unwrap(),
             UnityConfigKey::Databricks(DatabricksConfigKey::Token)
@@ -952,6 +1359,144 @@ mod tests {
     }
 
     #[test]
+    fn cloud_identities_need_a_unity_catalog_scope_or_audience() {
+        let oss = Url::parse("https://uc.example.com/api/2.1/unity-catalog/").unwrap();
+        let sp = UnityStoreFactoryBuilder::new().with_options([
+            ("azure_client_id", "app"),
+            ("azure_client_secret", "s"),
+            ("azure_tenant_id", "t"),
+        ]);
+        assert_eq!(
+            sp.detect_auth_type(&oss),
+            None,
+            "an Azure identity is not sent to a server without a scope"
+        );
+        let scoped = |builder: UnityStoreFactoryBuilder| {
+            builder
+                .with_options([("unity_oauth_scope", "api://uc/.default")])
+                .detect_auth_type(&oss)
+        };
+        assert_eq!(scoped(sp.clone()), Some(UnityAuthType::AzureClientSecret));
+        assert_eq!(
+            scoped(UnityStoreFactoryBuilder::new().with_options([
+                ("azure_client_id", "app"),
+                ("azure_tenant_id", "t"),
+                ("azure_federated_token_file", "/var/run/token"),
+            ])),
+            Some(UnityAuthType::AzureWorkloadIdentity)
+        );
+        assert_eq!(
+            scoped(UnityStoreFactoryBuilder::new().with_options([("azure_use_azure_cli", "true")])),
+            Some(UnityAuthType::AzureCli)
+        );
+        assert_eq!(
+            scoped(UnityStoreFactoryBuilder::new().with_options([("azure_client_id", "uami")])),
+            Some(UnityAuthType::AzureManagedIdentity)
+        );
+        assert_eq!(
+            scoped(UnityStoreFactoryBuilder::new()),
+            None,
+            "a system-assigned identity is only used when selected"
+        );
+
+        // Azure Databricks has a well-known scope.
+        let adb = Url::parse("https://adb-1.2.azuredatabricks.net/api/2.1/unity-catalog/").unwrap();
+        assert_eq!(
+            sp.detect_auth_type(&adb),
+            Some(UnityAuthType::AzureClientSecret)
+        );
+        assert_eq!(
+            sp.oauth_scope(&adb).as_deref(),
+            Some(AZURE_DATABRICKS_SCOPE)
+        );
+
+        let gcp = UnityStoreFactoryBuilder::new()
+            .with_options([("google_application_credentials", "/etc/sa.json")]);
+        assert_eq!(gcp.detect_auth_type(&oss), None);
+        assert_eq!(
+            gcp.with_options([("unity_oauth_audience", "https://uc.example.com")])
+                .detect_auth_type(&oss),
+            Some(UnityAuthType::GcpIdToken)
+        );
+    }
+
+    #[test]
+    fn unity_specific_credentials_win_over_cloud_identities() {
+        let url = Url::parse("https://uc.example.com/api/2.1/unity-catalog/").unwrap();
+        let builder = UnityStoreFactoryBuilder::new().with_options([
+            ("azure_client_id", "deployment-app"),
+            ("azure_client_secret", "deployment-secret"),
+            ("azure_tenant_id", "deployment-tenant"),
+            ("unity_oauth_scope", "api://uc/.default"),
+        ]);
+        assert_eq!(
+            builder.clone().with_token("t").detect_auth_type(&url),
+            Some(UnityAuthType::Bearer)
+        );
+        let unity = builder.clone().with_options([
+            ("unity_client_id", "uc-app"),
+            ("unity_client_secret", "uc-secret"),
+        ]);
+        assert_eq!(unity.client_id().as_deref(), Some("uc-app"));
+        assert_eq!(unity.client_secret().as_deref(), Some("uc-secret"));
+        assert_eq!(
+            unity.tenant_id().as_deref(),
+            Some("deployment-tenant"),
+            "the tenant falls back to the well-known key"
+        );
+        assert_eq!(
+            unity
+                .with_options([("unity_azure_tenant_id", "uc-tenant")])
+                .tenant_id()
+                .as_deref(),
+            Some("uc-tenant")
+        );
+
+        // A client id and secret never mix identities.
+        let id_only = builder.with_options([("unity_client_id", "uami")]);
+        assert_eq!(id_only.client_id().as_deref(), Some("uami"));
+        assert_eq!(id_only.client_secret(), None);
+        assert_eq!(
+            id_only.detect_auth_type(&url),
+            Some(UnityAuthType::AzureManagedIdentity)
+        );
+    }
+
+    #[test]
+    fn databricks_target_is_recognised_by_host() {
+        let builder = UnityStoreFactoryBuilder::new();
+        for (url, expected) in [
+            (
+                "https://dbc-1.cloud.databricks.com/api/2.1/unity-catalog/",
+                true,
+            ),
+            (
+                "https://adb-1.2.azuredatabricks.net/api/2.1/unity-catalog/",
+                true,
+            ),
+            (
+                "https://1.2.gcp.databricks.com/api/2.1/unity-catalog/",
+                true,
+            ),
+            ("https://uc.example.com/api/2.1/unity-catalog/", false),
+            (
+                "https://notazuredatabricks.net/api/2.1/unity-catalog/",
+                false,
+            ),
+        ] {
+            let url = Url::parse(url).unwrap();
+            assert_eq!(builder.databricks_target(&url), expected, "{url}");
+        }
+        let with_host = builder.with_config(
+            UnityConfigKey::Databricks(DatabricksConfigKey::Host),
+            "https://dbc.private.example.com",
+        );
+        assert!(
+            with_host.databricks_target(&Url::parse("https://dbc.private.example.com/").unwrap())
+        );
+    }
+
+    #[test]
     fn forced_auth_types_report_missing_config() {
         for (auth_type, missing) in [
             ("azure-client-secret", "unity_azure_tenant_id"),
@@ -1008,6 +1553,8 @@ mod tests {
             .with_options([
                 ("unity_client_secret", "super-secret-client"),
                 ("databricks_client_secret", "super-secret-value"),
+                ("azure_client_secret", "super-secret-azure"),
+                ("google_service_account_key", "super-secret-google"),
             ]);
         let debug = format!("{builder:?}");
         assert!(!debug.contains("super-secret"), "secret leaked: {debug}");

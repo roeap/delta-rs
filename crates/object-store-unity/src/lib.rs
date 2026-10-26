@@ -45,21 +45,26 @@
 //!
 //! Unity Catalog runs wherever it is deployed, behind whatever identity
 //! provider the deployment uses. [`UnityStoreFactoryBuilder`] authenticates
-//! with any of these ([`UnityAuthType`]), configured through `unity_*` keys:
+//! with any of these ([`UnityAuthType`]). Most deployments need no
+//! Unity-specific credentials: the workload's cloud identity is picked up from
+//! the same `azure_*` / `google_*` keys and `AZURE_*` / `GOOGLE_*` variables
+//! that `object_store` reads, once the Unity Catalog scope or audience is
+//! known. `unity_*` keys select a different identity for Unity Catalog:
 //!
 //! | Deployment | Configuration |
 //! |------------|---------------|
 //! | A token you already have | `unity_token` |
 //! | OSS Unity Catalog behind an IdP: exchange an ID token for a UC token | `unity_token_file` / `unity_token_env` (or an identity flow below) + `unity_token_exchange=true` |
 //! | Any OAuth 2.0 IdP (Okta, Keycloak, Cognito, Entra, …) | `unity_client_id` + `unity_client_secret` + `unity_oauth_token_url`, optional `unity_oauth_scope` / `unity_oauth_audience` |
-//! | Entra ID service principal | `unity_client_id` + `unity_client_secret` + `unity_azure_tenant_id` + `unity_oauth_scope` |
-//! | Azure managed / workload identity, Azure CLI | `unity_auth_type=azure-managed-identity` / `azure-workload-identity` / `azure-cli` + `unity_oauth_scope` |
-//! | GCP service account (ID token) | `unity_auth_type=gcp-id-token`, optional `unity_oauth_audience` |
+//! | The workload's Entra ID identity: service principal, workload identity, user-assigned managed identity, Azure CLI | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_SECRET` / `AZURE_FEDERATED_TOKEN_FILE`, … ([`AzureIdentityKey`]) + `unity_oauth_scope` (known for Azure Databricks) |
+//! | The workload's Google service account (ID token) | `GOOGLE_APPLICATION_CREDENTIALS`, … ([`GoogleIdentityKey`]) + `unity_oauth_audience` |
+//! | A dedicated Entra ID service principal | `unity_client_id` + `unity_client_secret` + `unity_azure_tenant_id` + `unity_oauth_scope` |
+//! | A system-assigned managed identity, the GCP metadata server | `unity_auth_type=azure-managed-identity` + `unity_oauth_scope`, `unity_auth_type=gcp-id-token` |
 //! | Databricks | `databricks_*` options, `DATABRICKS_*` variables, or a `.databrickscfg` profile |
 //! | Local development | `unity_allow_unauthenticated=true` |
 //!
-//! Explicit `unity_*` configuration wins over Databricks; see
-//! [`UnityAuthType`] for the detection order.
+//! The most specific configuration wins: `unity_*` credentials, then
+//! Databricks, then the well-known cloud identity; see [`UnityAuthType`].
 //!
 //! # Credential lifecycle
 //!
@@ -109,7 +114,9 @@ mod reference;
 mod routing;
 mod store;
 
-pub use builder::{UnityAuthType, UnityConfigKey, UnityStoreFactoryBuilder};
+pub use builder::{
+    AzureIdentityKey, GoogleIdentityKey, UnityAuthType, UnityConfigKey, UnityStoreFactoryBuilder,
+};
 pub use client::UnityClient;
 pub use credential::CredentialVendor;
 pub use error::{Error, Result};

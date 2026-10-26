@@ -48,6 +48,10 @@ let bytes = volume.as_dyn().get(&"raw/file.json".into()).await?.bytes().await?;
   vars, and the RFC 8693 token exchange OSS Unity Catalog uses. Databricks
   (PATs, OAuth M2M, OIDC, Azure, `.databrickscfg` profiles) is supported via
   [`olai-http`](https://docs.rs/olai-http).
+- **The workload's own identity.** The `azure_*` / `google_*` identity keys
+  and `AZURE_*` / `GOOGLE_*` variables `object_store` reads also authenticate
+  to Unity Catalog, once its scope or audience is known. `unity_*` keys
+  select a different identity; the most specific configuration wins.
 - **AWS regions discovered.** Without a configured region, a bucket's region
   comes from S3 itself (`x-amz-bucket-region`), once per bucket.
 - **One registry, many securables.** `RoutingObjectStore` serves every
@@ -72,12 +76,17 @@ storage-options map can be passed through.
 | `unity_token_file` / `unity_token_env` | Token read from a file or environment variable |
 | `unity_token_exchange` | `true` (server's `/api/1.0/unity-control/auth/tokens`) or an endpoint URL |
 | `unity_auth_type` | Force a flow: `bearer`, `oauth-client-credentials`, `azure-client-secret`, `azure-managed-identity`, `azure-workload-identity`, `azure-cli`, `gcp-id-token`, `token-file`, `token-env`, `databricks`, `none` |
+| `azure_client_id` / `azure_client_secret` / `azure_tenant_id` / `azure_federated_token_file` / `azure_msi_endpoint` / `azure_object_id` / `azure_msi_resource_id` / `azure_use_azure_cli` | The workload's Entra ID identity, as for `object_store`; needs `unity_oauth_scope` (known for Azure Databricks) |
+| `google_application_credentials` / `google_service_account` / `google_service_account_key` | The workload's Google service account; needs `unity_oauth_audience` |
 | `databricks_*` | Databricks authentication, or HTTP client options (`allow_http`, `timeout`, …) |
 | `aws_region` | Region of vended S3 locations (default: discovered, then `AWS_REGION`) |
 | `unity_allow_unauthenticated` | Local development without auth |
 
 Every key can also be set as an upper-case environment variable read by
-`from_env()` (`UNITY_TOKEN`, …).
+`from_env()` (`UNITY_TOKEN`, `AZURE_CLIENT_ID`, …). A `unity_*` key wins over
+its well-known counterpart, e.g. `unity_azure_tenant_id` over
+`azure_tenant_id`; Unity-specific credentials win over Databricks, and
+Databricks over the well-known cloud identity.
 
 ## License
 
