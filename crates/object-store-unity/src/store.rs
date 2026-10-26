@@ -96,6 +96,12 @@ pub struct UnityStoreFactory {
     client: UnityClient,
     aws_region: Option<String>,
     io_runtime: Option<Handle>,
+    /// Discovered bucket regions (`None`: discovery failed), shared by clones.
+    #[cfg(feature = "aws")]
+    bucket_regions: Arc<std::sync::Mutex<std::collections::HashMap<String, Option<String>>>>,
+    /// Where bucket regions are probed; S3's global endpoint.
+    #[cfg(feature = "aws")]
+    region_endpoint: Arc<str>,
 }
 
 impl UnityStoreFactory {
@@ -108,6 +114,10 @@ impl UnityStoreFactory {
             client,
             aws_region,
             io_runtime,
+            #[cfg(feature = "aws")]
+            bucket_regions: Default::default(),
+            #[cfg(feature = "aws")]
+            region_endpoint: Arc::from("https://s3.amazonaws.com"),
         }
     }
 
@@ -335,9 +345,10 @@ impl UnityStoreFactory {
             .as_ref()
             .and_then(|aws| aws.access_point.clone())
             .filter(|ap| !ap.is_empty());
+        let region = self.s3_region(url, access_point.as_deref()).await;
         let provider = UnityCredentialProvider::new(vendor, credentials, aws_credential).await?;
-        let mut builder = s3_builder(url, self.aws_region.clone(), access_point)?
-            .with_credentials(Arc::new(provider));
+        let mut builder =
+            s3_builder(url, region, access_point)?.with_credentials(Arc::new(provider));
         if let Some(connector) = self.connector() {
             builder = builder.with_http_connector(connector);
         }
@@ -391,6 +402,77 @@ impl UnityStoreFactory {
         })
     }
 
+    /// The region of a vended S3 location.
+    ///
+    /// In order: the configured region; the region of a vended access-point
+    /// ARN; the bucket's region, discovered once per bucket; the `AWS_REGION`
+    /// environment variable. `None` leaves object_store's default.
+    #[cfg(feature = "aws")]
+    async fn s3_region(&self, url: &Url, access_point: Option<&str>) -> Option<String> {
+        if url.scheme() == "r2" {
+            // R2 always uses its `auto` region.
+            return None;
+        }
+        if let Some(region) = &self.aws_region {
+            return Some(region.clone());
+        }
+        if let Some(region) = access_point.and_then(access_point_region) {
+            return Some(region.to_string());
+        }
+        let discovered = match (url.scheme(), url.host_str()) {
+            ("s3" | "s3a", Some(bucket)) => self.bucket_region(bucket).await,
+            _ => None,
+        };
+        discovered.or_else(|| std::env::var("AWS_REGION").ok())
+    }
+
+    /// Discover a bucket's region from the `x-amz-bucket-region` header S3
+    /// returns on `HeadBucket` — also when the caller may not access the
+    /// bucket. Results, including failures, are cached per bucket.
+    ///
+    /// The probe is anonymous: vended credentials are scoped to a prefix and
+    /// may not authorize `HeadBucket`, and Unity Catalog credentials must
+    /// never reach S3.
+    #[cfg(feature = "aws")]
+    async fn bucket_region(&self, bucket: &str) -> Option<String> {
+        if let Some(cached) = self.bucket_regions.lock().unwrap().get(bucket) {
+            return cached.clone();
+        }
+        // Path-style, so bucket names with dots still match S3's certificate.
+        let endpoint = format!("{}/{bucket}", self.region_endpoint);
+        let probe = async move {
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(3))
+                .build()
+                .ok()?;
+            let response = client.head(endpoint).send().await.ok()?;
+            let region = response.headers().get("x-amz-bucket-region")?;
+            region.to_str().ok().map(str::to_string)
+        };
+        let region = match &self.io_runtime {
+            Some(handle) => handle.spawn(probe).await.ok().flatten(),
+            None => probe.await,
+        };
+        if region.is_none() {
+            tracing::warn!(
+                "could not discover the region of bucket `{bucket}`; set `aws_region` \
+                 to avoid relying on `AWS_REGION`"
+            );
+        }
+        self.bucket_regions
+            .lock()
+            .unwrap()
+            .insert(bucket.to_string(), region.clone());
+        region
+    }
+
+    #[cfg(all(test, feature = "aws"))]
+    fn with_region_endpoint(mut self, endpoint: &str) -> Self {
+        self.region_endpoint = Arc::from(endpoint);
+        self
+    }
+
     /// A connector spawning object-store requests on the configured I/O runtime.
     #[cfg(any(feature = "aws", feature = "azure", feature = "gcp"))]
     fn connector(&self) -> Option<object_store::client::SpawnedReqwestConnector> {
@@ -425,13 +507,13 @@ fn parse_location(location: Option<&str>) -> Result<Option<Url>> {
 /// `auto` region are set explicitly — an AWS region override must not clobber
 /// the latter.
 ///
-/// For S3 the region is `aws_region`, else `AWS_REGION`, else object_store's
-/// default. A vended S3 access-point ARN is used as the bucket, so SigV4
+/// For S3, `region` (see [`UnityStoreFactory::s3_region`]) is applied when
+/// known. A vended S3 access-point ARN is used as the bucket, so SigV4
 /// signatures match what STS authorized.
 #[cfg(feature = "aws")]
 fn s3_builder(
     url: &Url,
-    aws_region: Option<String>,
+    region: Option<String>,
     access_point: Option<String>,
 ) -> Result<object_store::aws::AmazonS3Builder> {
     use object_store::aws::AmazonS3Builder;
@@ -451,13 +533,23 @@ fn s3_builder(
     }
 
     let mut builder = AmazonS3Builder::new().with_url(url.as_str());
-    if let Some(region) = aws_region.or_else(|| std::env::var("AWS_REGION").ok()) {
+    if let Some(region) = region {
         builder = builder.with_region(region);
     }
     if let Some(access_point) = access_point {
         builder = builder.with_bucket_name(access_point);
     }
     Ok(builder)
+}
+
+/// The region of an S3 access-point ARN (`arn:<partition>:s3:<region>:…`).
+#[cfg(feature = "aws")]
+fn access_point_region(arn: &str) -> Option<&str> {
+    let mut parts = arn.split(':');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("arn"), Some(_), Some("s3"), Some(region)) if !region.is_empty() => Some(region),
+        _ => None,
+    }
 }
 
 /// A store for a `file://` location: local storage needs no vended credential.
@@ -850,6 +942,107 @@ mod tests {
 
         token.assert_async().await;
         vend.assert_async().await;
+    }
+
+    async fn mock_region<'a>(
+        server: &'a MockServer,
+        bucket: &str,
+        region: &str,
+    ) -> httpmock::Mock<'a> {
+        let path = format!("/{bucket}");
+        let region = region.to_string();
+        server
+            .mock_async(|when, then| {
+                when.method("HEAD").path(path);
+                // S3 sends the header even when the caller may not access the
+                // bucket.
+                then.status(403).header("x-amz-bucket-region", region);
+            })
+            .await
+    }
+
+    fn unconfigured_region_factory(server: &MockServer) -> UnityStoreFactory {
+        UnityStoreFactory::builder()
+            .with_url(server.url(API))
+            .with_token("pat")
+            .build()
+            .unwrap()
+            .with_region_endpoint(&server.base_url())
+    }
+
+    /// Without a configured region, the bucket's region is discovered once
+    /// and reused for every location in that bucket.
+    #[tokio::test]
+    async fn bucket_region_is_discovered_once_per_bucket() {
+        let server = MockServer::start_async().await;
+        let probe = mock_region(&server, "data.bucket", "eu-central-1").await;
+        let factory = unconfigured_region_factory(&server);
+
+        for path in ["s3://data.bucket/t1/", "s3://data.bucket/t2/"] {
+            let region = factory.s3_region(&Url::parse(path).unwrap(), None).await;
+            assert_eq!(region.as_deref(), Some("eu-central-1"));
+        }
+        probe.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn configured_and_access_point_regions_skip_discovery() {
+        let server = MockServer::start_async().await;
+        let probe = mock_region(&server, "bucket", "eu-central-1").await;
+        let url = Url::parse("s3://bucket/t/").unwrap();
+
+        let configured = UnityStoreFactory::builder()
+            .with_url(server.url(API))
+            .with_token("pat")
+            .with_aws_region("us-west-2")
+            .build()
+            .unwrap()
+            .with_region_endpoint(&server.base_url());
+        assert_eq!(
+            configured.s3_region(&url, None).await.as_deref(),
+            Some("us-west-2")
+        );
+
+        let arn = "arn:aws:s3:ap-south-1:123456789012:accesspoint/ap";
+        let factory = unconfigured_region_factory(&server);
+        assert_eq!(
+            factory.s3_region(&url, Some(arn)).await.as_deref(),
+            Some("ap-south-1")
+        );
+
+        let r2 = Url::parse("r2://bucket@acct.r2.cloudflarestorage.com/t/").unwrap();
+        assert_eq!(factory.s3_region(&r2, None).await, None);
+        probe.assert_calls_async(0).await;
+    }
+
+    /// A failed probe is cached too, so an unreachable endpoint costs one try.
+    #[tokio::test]
+    async fn failed_discovery_is_cached() {
+        let server = MockServer::start_async().await;
+        let probe = server
+            .mock_async(|when, then| {
+                when.method("HEAD").path("/bucket");
+                then.status(500);
+            })
+            .await;
+        let factory = unconfigured_region_factory(&server);
+        for _ in 0..2 {
+            assert_eq!(factory.bucket_region("bucket").await, None);
+        }
+        probe.assert_calls_async(1).await;
+    }
+
+    #[test]
+    fn access_point_region_parses_arns() {
+        assert_eq!(
+            access_point_region("arn:aws:s3:eu-west-1:123:accesspoint/ap"),
+            Some("eu-west-1")
+        );
+        assert_eq!(
+            access_point_region("arn:aws-cn:s3:cn-north-1:123:accesspoint/ap"),
+            Some("cn-north-1")
+        );
+        assert_eq!(access_point_region("my-bucket"), None);
     }
 
     async fn mock_vend<'a>(server: &'a MockServer, bearer: &str) -> httpmock::Mock<'a> {

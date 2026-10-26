@@ -21,7 +21,7 @@ object_store = { workspace = true, features = ["cloud"] }
 olai-http = "0.0.8"
 percent-encoding = "2.3"
 # Same major as olai-http, whose request API returns `reqwest::Response`.
-reqwest = { version = "0.13", default-features = false, features = ["json"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
