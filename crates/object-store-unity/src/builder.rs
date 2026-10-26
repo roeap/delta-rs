@@ -44,9 +44,14 @@ const DATABRICKS_DOMAINS: &[&str] = &[
 
 /// Configuration keys for [`UnityStoreFactoryBuilder`].
 ///
+/// Generic options sit at the top level; authentication options are grouped
+/// by the identity they configure, most specific first: Unity Catalog's own
+/// ([`AuthConfigKey`]), Databricks, then the workload's Azure or Google
+/// identity. See [`UnityAuthType`] for how a group is chosen.
+///
 /// Parse one from its string form with [`FromStr`]. Keys are matched exactly
 /// (lowercase); environment variables are matched by their lowercased name, so
-/// `UNITY_TOKEN` sets [`UnityConfigKey::Token`].
+/// `UNITY_TOKEN` sets [`AuthConfigKey::Token`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum UnityConfigKey {
@@ -64,6 +69,78 @@ pub enum UnityConfigKey {
     /// `AWS_REGION` environment variable.
     AwsRegion,
 
+    /// An HTTP client option for Unity Catalog and token requests:
+    /// `allow_http`, `timeout`, `proxy_url`, …, also accepted with a
+    /// `databricks_` prefix.
+    Client(ClientConfigKey),
+
+    /// A Unity Catalog authentication option; see [`AuthConfigKey`].
+    Auth(AuthConfigKey),
+
+    /// A Databricks authentication option, resolved by [`olai_http`]'s
+    /// Databricks credential chain: `databricks_host`, `databricks_token`,
+    /// `databricks_client_id` + `databricks_client_secret`,
+    /// `databricks_azure_tenant_id`, `databricks_auth_type`,
+    /// `databricks_config_profile`, …, each with or without the `databricks_`
+    /// prefix.
+    Databricks(DatabricksConfigKey),
+
+    /// A well-known Azure identity option; see [`AzureIdentityKey`].
+    Azure(AzureIdentityKey),
+
+    /// A well-known Google identity option; see [`GoogleIdentityKey`].
+    Google(GoogleIdentityKey),
+}
+
+impl AsRef<str> for UnityConfigKey {
+    fn as_ref(&self) -> &str {
+        match self {
+            Self::Url => "unity_catalog_url",
+            Self::AwsRegion => "aws_region",
+            Self::Client(key) => key.as_ref(),
+            Self::Auth(key) => key.as_ref(),
+            Self::Databricks(key) => key.as_ref(),
+            Self::Azure(key) => key.as_ref(),
+            Self::Google(key) => key.as_ref(),
+        }
+    }
+}
+
+impl FromStr for UnityConfigKey {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "unity_catalog_url" | "unity_url" => Ok(Self::Url),
+            "aws_region" | "unity_aws_region" => Ok(Self::AwsRegion),
+            _ => s
+                .parse()
+                .map(Self::Auth)
+                .or_else(|_| s.parse().map(Self::Azure))
+                .or_else(|_| s.parse().map(Self::Google))
+                .or_else(|_| {
+                    s.parse().map(|key| match key {
+                        DatabricksConfigKey::Client(key) => Self::Client(key),
+                        key => Self::Databricks(key),
+                    })
+                })
+                .map_err(|_| Error::UnknownConfigurationKey(s.to_string())),
+        }
+    }
+}
+
+/// A Unity Catalog authentication option.
+///
+/// These configure authentication for Unity Catalog specifically, and win
+/// over the Databricks and well-known cloud identity options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AuthConfigKey {
+    /// How to authenticate; see [`UnityAuthType`]. Detected when unset.
+    ///
+    /// Supported keys: `unity_auth_type`.
+    AuthType,
+
     /// Send requests unauthenticated when no credentials are configured.
     ///
     /// Only meant for local development against an unauthenticated server.
@@ -71,15 +148,22 @@ pub enum UnityConfigKey {
     /// Supported keys: `unity_allow_unauthenticated`.
     AllowUnauthenticated,
 
-    /// How to authenticate; see [`UnityAuthType`]. Detected when unset.
-    ///
-    /// Supported keys: `unity_auth_type`.
-    AuthType,
-
     /// A bearer token for Unity Catalog.
     ///
     /// Supported keys: `unity_token`, `unity_access_token`.
     Token,
+
+    /// A file holding a token, re-read on every refresh — e.g. a projected
+    /// Kubernetes service-account token, or the federated token of Azure
+    /// workload identity.
+    ///
+    /// Supported keys: `unity_token_file`.
+    TokenFile,
+
+    /// An environment variable holding a token, re-read on every refresh.
+    ///
+    /// Supported keys: `unity_token_env`.
+    TokenEnv,
 
     /// The OAuth client id, for client credentials or an Azure service
     /// principal; or the client id of a user-assigned Azure managed identity.
@@ -98,13 +182,15 @@ pub enum UnityConfigKey {
     OAuthTokenUrl,
 
     /// The OAuth scope to request. Azure flows need one, e.g.
-    /// `api://my-catalog/.default`.
+    /// `api://my-catalog/.default`; it also scopes the workload's Azure
+    /// identity to Unity Catalog.
     ///
     /// Supported keys: `unity_oauth_scope`.
     OAuthScope,
 
     /// The OAuth audience to request. GCP ID tokens default to the origin of
-    /// the Unity Catalog URL.
+    /// the Unity Catalog URL; it also scopes the workload's Google identity
+    /// to Unity Catalog.
     ///
     /// Supported keys: `unity_oauth_audience`.
     OAuthAudience,
@@ -118,18 +204,6 @@ pub enum UnityConfigKey {
     ///
     /// Supported keys: `unity_azure_authority_host`.
     AzureAuthorityHost,
-
-    /// A file holding a token, re-read on every refresh — e.g. a projected
-    /// Kubernetes service-account token, or the federated token of Azure
-    /// workload identity.
-    ///
-    /// Supported keys: `unity_token_file`.
-    TokenFile,
-
-    /// An environment variable holding a token, re-read on every refresh.
-    ///
-    /// Supported keys: `unity_token_env`.
-    TokenEnv,
 
     /// Exchange the configured token for a Unity Catalog token (RFC 8693), as
     /// OSS Unity Catalog expects for identity-provider tokens.
@@ -145,31 +219,16 @@ pub enum UnityConfigKey {
     ///
     /// Supported keys: `unity_token_exchange_subject_token_type`.
     TokenExchangeSubjectTokenType,
-
-    /// A well-known Azure identity option; see [`AzureIdentityKey`].
-    Azure(AzureIdentityKey),
-
-    /// A well-known Google identity option; see [`GoogleIdentityKey`].
-    Google(GoogleIdentityKey),
-
-    /// A Databricks authentication or HTTP client option, resolved by
-    /// [`olai_http`]'s Databricks credential chain: `databricks_host`,
-    /// `databricks_token`, `databricks_client_id` + `databricks_client_secret`,
-    /// `databricks_azure_tenant_id`, `databricks_auth_type`,
-    /// `databricks_config_profile`, …, each with or without the `databricks_`
-    /// prefix. HTTP client options (`allow_http`, `timeout`, …) also apply to
-    /// the other authentication types.
-    Databricks(DatabricksConfigKey),
 }
 
-impl AsRef<str> for UnityConfigKey {
+impl AsRef<str> for AuthConfigKey {
     fn as_ref(&self) -> &str {
         match self {
-            Self::Url => "unity_catalog_url",
-            Self::AwsRegion => "aws_region",
-            Self::AllowUnauthenticated => "unity_allow_unauthenticated",
             Self::AuthType => "unity_auth_type",
+            Self::AllowUnauthenticated => "unity_allow_unauthenticated",
             Self::Token => "unity_token",
+            Self::TokenFile => "unity_token_file",
+            Self::TokenEnv => "unity_token_env",
             Self::ClientId => "unity_client_id",
             Self::ClientSecret => "unity_client_secret",
             Self::OAuthTokenUrl => "unity_oauth_token_url",
@@ -177,27 +236,22 @@ impl AsRef<str> for UnityConfigKey {
             Self::OAuthAudience => "unity_oauth_audience",
             Self::AzureTenantId => "unity_azure_tenant_id",
             Self::AzureAuthorityHost => "unity_azure_authority_host",
-            Self::TokenFile => "unity_token_file",
-            Self::TokenEnv => "unity_token_env",
             Self::TokenExchange => "unity_token_exchange",
             Self::TokenExchangeSubjectTokenType => "unity_token_exchange_subject_token_type",
-            Self::Azure(key) => key.as_ref(),
-            Self::Google(key) => key.as_ref(),
-            Self::Databricks(key) => key.as_ref(),
         }
     }
 }
 
-impl FromStr for UnityConfigKey {
+impl FromStr for AuthConfigKey {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
         match s {
-            "unity_catalog_url" | "unity_url" => Ok(Self::Url),
-            "aws_region" | "unity_aws_region" => Ok(Self::AwsRegion),
-            "unity_allow_unauthenticated" => Ok(Self::AllowUnauthenticated),
             "unity_auth_type" => Ok(Self::AuthType),
+            "unity_allow_unauthenticated" => Ok(Self::AllowUnauthenticated),
             "unity_token" | "unity_access_token" => Ok(Self::Token),
+            "unity_token_file" => Ok(Self::TokenFile),
+            "unity_token_env" => Ok(Self::TokenEnv),
             "unity_client_id" => Ok(Self::ClientId),
             "unity_client_secret" => Ok(Self::ClientSecret),
             "unity_oauth_token_url" => Ok(Self::OAuthTokenUrl),
@@ -205,16 +259,9 @@ impl FromStr for UnityConfigKey {
             "unity_oauth_audience" => Ok(Self::OAuthAudience),
             "unity_azure_tenant_id" => Ok(Self::AzureTenantId),
             "unity_azure_authority_host" => Ok(Self::AzureAuthorityHost),
-            "unity_token_file" => Ok(Self::TokenFile),
-            "unity_token_env" => Ok(Self::TokenEnv),
             "unity_token_exchange" => Ok(Self::TokenExchange),
             "unity_token_exchange_subject_token_type" => Ok(Self::TokenExchangeSubjectTokenType),
-            _ => s
-                .parse()
-                .map(Self::Azure)
-                .or_else(|_| s.parse().map(Self::Google))
-                .or_else(|_| s.parse().map(Self::Databricks))
-                .map_err(|_| Error::UnknownConfigurationKey(s.to_string())),
+            _ => Err(Error::UnknownConfigurationKey(s.to_string())),
         }
     }
 }
@@ -369,7 +416,7 @@ impl FromStr for GoogleIdentityKey {
 
 /// How [`UnityStoreFactoryBuilder`] authenticates to Unity Catalog.
 ///
-/// Set it with [`UnityConfigKey::AuthType`] (string form in parentheses).
+/// Set it with [`AuthConfigKey::AuthType`] (string form in parentheses).
 /// When unset, it is detected from the configuration, most specific first:
 ///
 /// 1. Unity-specific credentials: a token (`bearer`); a client id + secret
@@ -383,8 +430,8 @@ impl FromStr for GoogleIdentityKey {
 ///    principal, workload identity, the Azure CLI, or a managed identity; a
 ///    Google service account (`gcp-id-token`). Only used once the identity
 ///    can be scoped to Unity Catalog — an Azure scope
-///    ([`UnityConfigKey::OAuthScope`], known for Azure Databricks) or a
-///    Google audience ([`UnityConfigKey::OAuthAudience`]) — so an identity
+///    ([`AuthConfigKey::OAuthScope`], known for Azure Databricks) or a
+///    Google audience ([`AuthConfigKey::OAuthAudience`]) — so an identity
 ///    provisioned for other services is not sent to an arbitrary server.
 /// 4. Unauthenticated, if allowed (`none`).
 ///
@@ -397,7 +444,7 @@ impl FromStr for GoogleIdentityKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum UnityAuthType {
-    /// A static bearer token (`bearer`): [`UnityConfigKey::Token`].
+    /// A static bearer token (`bearer`): [`AuthConfigKey::Token`].
     Bearer,
     /// OAuth 2.0 client credentials (`oauth-client-credentials`): client id,
     /// secret and token URL; scope and audience optional.
@@ -451,6 +498,99 @@ impl FromStr for UnityAuthType {
     }
 }
 
+/// Values of the [`AuthConfigKey`] group.
+#[derive(Clone, Default)]
+struct AuthConfig {
+    auth_type: Option<String>,
+    allow_unauthenticated: bool,
+    token: Option<String>,
+    token_file: Option<String>,
+    token_env: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    oauth_token_url: Option<String>,
+    oauth_scope: Option<String>,
+    oauth_audience: Option<String>,
+    azure_tenant_id: Option<String>,
+    azure_authority_host: Option<String>,
+    token_exchange: Option<String>,
+    token_exchange_subject_token_type: Option<String>,
+}
+
+impl fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let set = |value: &Option<String>| value.as_ref().map(|_| "***");
+        f.debug_struct("AuthConfig")
+            .field("auth_type", &self.auth_type)
+            .field("allow_unauthenticated", &self.allow_unauthenticated)
+            .field("token", &set(&self.token))
+            .field("token_file", &self.token_file)
+            .field("token_env", &self.token_env)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &set(&self.client_secret))
+            .field("oauth_token_url", &self.oauth_token_url)
+            .field("oauth_scope", &self.oauth_scope)
+            .field("oauth_audience", &self.oauth_audience)
+            .field("azure_tenant_id", &self.azure_tenant_id)
+            .field("azure_authority_host", &self.azure_authority_host)
+            .field("token_exchange", &self.token_exchange)
+            .field(
+                "token_exchange_subject_token_type",
+                &self.token_exchange_subject_token_type,
+            )
+            .finish()
+    }
+}
+
+impl AuthConfig {
+    fn set(&mut self, key: AuthConfigKey, value: String) {
+        let slot = match key {
+            AuthConfigKey::AllowUnauthenticated => {
+                self.allow_unauthenticated = str_is_truthy(&value);
+                return;
+            }
+            AuthConfigKey::AuthType => &mut self.auth_type,
+            AuthConfigKey::Token => &mut self.token,
+            AuthConfigKey::TokenFile => &mut self.token_file,
+            AuthConfigKey::TokenEnv => &mut self.token_env,
+            AuthConfigKey::ClientId => &mut self.client_id,
+            AuthConfigKey::ClientSecret => &mut self.client_secret,
+            AuthConfigKey::OAuthTokenUrl => &mut self.oauth_token_url,
+            AuthConfigKey::OAuthScope => &mut self.oauth_scope,
+            AuthConfigKey::OAuthAudience => &mut self.oauth_audience,
+            AuthConfigKey::AzureTenantId => &mut self.azure_tenant_id,
+            AuthConfigKey::AzureAuthorityHost => &mut self.azure_authority_host,
+            AuthConfigKey::TokenExchange => &mut self.token_exchange,
+            AuthConfigKey::TokenExchangeSubjectTokenType => {
+                &mut self.token_exchange_subject_token_type
+            }
+        };
+        *slot = Some(value);
+    }
+
+    fn get(&self, key: AuthConfigKey) -> Option<String> {
+        let value = match key {
+            AuthConfigKey::AllowUnauthenticated => {
+                return Some(self.allow_unauthenticated.to_string());
+            }
+            AuthConfigKey::AuthType => &self.auth_type,
+            AuthConfigKey::Token => &self.token,
+            AuthConfigKey::TokenFile => &self.token_file,
+            AuthConfigKey::TokenEnv => &self.token_env,
+            AuthConfigKey::ClientId => &self.client_id,
+            AuthConfigKey::ClientSecret => &self.client_secret,
+            AuthConfigKey::OAuthTokenUrl => &self.oauth_token_url,
+            AuthConfigKey::OAuthScope => &self.oauth_scope,
+            AuthConfigKey::OAuthAudience => &self.oauth_audience,
+            AuthConfigKey::AzureTenantId => &self.azure_tenant_id,
+            AuthConfigKey::AzureAuthorityHost => &self.azure_authority_host,
+            AuthConfigKey::TokenExchange => &self.token_exchange,
+            AuthConfigKey::TokenExchangeSubjectTokenType => &self.token_exchange_subject_token_type,
+        };
+        value.clone()
+    }
+}
+
 /// Builder for [`UnityStoreFactory`].
 ///
 /// ```no_run
@@ -475,20 +615,8 @@ impl FromStr for UnityAuthType {
 pub struct UnityStoreFactoryBuilder {
     url: Option<String>,
     aws_region: Option<String>,
-    allow_unauthenticated: bool,
-    auth_type: Option<String>,
-    token: Option<String>,
-    client_id: Option<String>,
-    client_secret: Option<String>,
-    oauth_token_url: Option<String>,
-    oauth_scope: Option<String>,
-    oauth_audience: Option<String>,
-    azure_tenant_id: Option<String>,
-    azure_authority_host: Option<String>,
-    token_file: Option<String>,
-    token_env: Option<String>,
-    token_exchange: Option<String>,
-    token_exchange_subject_token_type: Option<String>,
+    client_config: Vec<(ClientConfigKey, String)>,
+    auth: AuthConfig,
     azure: HashMap<AzureIdentityKey, String>,
     google: HashMap<GoogleIdentityKey, String>,
     databricks: Vec<(DatabricksConfigKey, String)>,
@@ -552,7 +680,7 @@ impl UnityStoreFactoryBuilder {
 
     /// Authenticate with a bearer token.
     pub fn with_token(mut self, token: impl Into<String>) -> Self {
-        self.token = Some(token.into());
+        self.auth.token = Some(token.into());
         self
     }
 
@@ -563,15 +691,15 @@ impl UnityStoreFactoryBuilder {
     }
 
     /// Send requests unauthenticated when no credentials are configured; see
-    /// [`UnityConfigKey::AllowUnauthenticated`].
+    /// [`AuthConfigKey::AllowUnauthenticated`].
     pub fn with_allow_unauthenticated(mut self, allow: bool) -> Self {
-        self.allow_unauthenticated = allow;
+        self.auth.allow_unauthenticated = allow;
         self
     }
 
     /// Set the HTTP client options for Unity Catalog and token requests.
     ///
-    /// Client options set through [`UnityConfigKey::Databricks`] keys
+    /// Client options set through [`UnityConfigKey::Client`] keys
     /// (`allow_http`, `timeout`, …) are applied on top.
     pub fn with_client_options(mut self, options: ClientOptions) -> Self {
         self.client_options = options;
@@ -611,24 +739,12 @@ impl UnityStoreFactoryBuilder {
         match key {
             UnityConfigKey::Url => self.url = Some(value),
             UnityConfigKey::AwsRegion => self.aws_region = Some(value),
-            UnityConfigKey::AllowUnauthenticated => {
-                self.allow_unauthenticated = str_is_truthy(&value)
+            UnityConfigKey::Client(key)
+            | UnityConfigKey::Databricks(DatabricksConfigKey::Client(key)) => {
+                self.client_config.retain(|(existing, _)| existing != &key);
+                self.client_config.push((key, value));
             }
-            UnityConfigKey::AuthType => self.auth_type = Some(value),
-            UnityConfigKey::Token => self.token = Some(value),
-            UnityConfigKey::ClientId => self.client_id = Some(value),
-            UnityConfigKey::ClientSecret => self.client_secret = Some(value),
-            UnityConfigKey::OAuthTokenUrl => self.oauth_token_url = Some(value),
-            UnityConfigKey::OAuthScope => self.oauth_scope = Some(value),
-            UnityConfigKey::OAuthAudience => self.oauth_audience = Some(value),
-            UnityConfigKey::AzureTenantId => self.azure_tenant_id = Some(value),
-            UnityConfigKey::AzureAuthorityHost => self.azure_authority_host = Some(value),
-            UnityConfigKey::TokenFile => self.token_file = Some(value),
-            UnityConfigKey::TokenEnv => self.token_env = Some(value),
-            UnityConfigKey::TokenExchange => self.token_exchange = Some(value),
-            UnityConfigKey::TokenExchangeSubjectTokenType => {
-                self.token_exchange_subject_token_type = Some(value)
-            }
+            UnityConfigKey::Auth(key) => self.auth.set(key, value),
             UnityConfigKey::Azure(key) => {
                 self.azure.insert(key, value);
             }
@@ -667,24 +783,14 @@ impl UnityStoreFactoryBuilder {
         let value = match key {
             UnityConfigKey::Url => &self.url,
             UnityConfigKey::AwsRegion => &self.aws_region,
-            UnityConfigKey::AllowUnauthenticated => {
-                return Some(self.allow_unauthenticated.to_string());
+            UnityConfigKey::Client(key)
+            | UnityConfigKey::Databricks(DatabricksConfigKey::Client(key)) => {
+                return self
+                    .client_value(*key)
+                    .map(str::to_string)
+                    .or_else(|| self.client_options.get_config_value(key));
             }
-            UnityConfigKey::AuthType => &self.auth_type,
-            UnityConfigKey::Token => &self.token,
-            UnityConfigKey::ClientId => &self.client_id,
-            UnityConfigKey::ClientSecret => &self.client_secret,
-            UnityConfigKey::OAuthTokenUrl => &self.oauth_token_url,
-            UnityConfigKey::OAuthScope => &self.oauth_scope,
-            UnityConfigKey::OAuthAudience => &self.oauth_audience,
-            UnityConfigKey::AzureTenantId => &self.azure_tenant_id,
-            UnityConfigKey::AzureAuthorityHost => &self.azure_authority_host,
-            UnityConfigKey::TokenFile => &self.token_file,
-            UnityConfigKey::TokenEnv => &self.token_env,
-            UnityConfigKey::TokenExchange => &self.token_exchange,
-            UnityConfigKey::TokenExchangeSubjectTokenType => {
-                &self.token_exchange_subject_token_type
-            }
+            UnityConfigKey::Auth(key) => return self.auth.get(*key),
             UnityConfigKey::Azure(key) => return self.azure.get(key).cloned(),
             UnityConfigKey::Google(key) => return self.google.get(key).cloned(),
             UnityConfigKey::Databricks(key) => {
@@ -756,15 +862,20 @@ impl UnityStoreFactoryBuilder {
     /// configuration, allowing HTTP when Unity Catalog itself is plain HTTP.
     fn http_options(&self, url: &Url) -> ClientOptions {
         let mut options = self.client_options.clone();
-        for (key, value) in &self.databricks {
-            if let DatabricksConfigKey::Client(key) = key {
-                options = options.with_config(*key, value);
-            }
+        for (key, value) in &self.client_config {
+            options = options.with_config(*key, value);
         }
-        if url.scheme() == "http" && self.databricks_value(allow_http_key()).is_none() {
+        if url.scheme() == "http" && self.client_value(ClientConfigKey::AllowHttp).is_none() {
             options = options.with_allow_http(true);
         }
         options
+    }
+
+    fn client_value(&self, key: ClientConfigKey) -> Option<&str> {
+        self.client_config
+            .iter()
+            .find(|(existing, _)| *existing == key)
+            .map(|(_, value)| value.as_str())
     }
 
     /// The authenticated transport for Unity Catalog requests.
@@ -772,7 +883,7 @@ impl UnityStoreFactoryBuilder {
         if let Some(client) = &self.client {
             return Ok(client.clone());
         }
-        let auth_type = match &self.auth_type {
+        let auth_type = match &self.auth.auth_type {
             Some(auth_type) => Some(auth_type.parse::<UnityAuthType>()?),
             None => None,
         };
@@ -780,7 +891,7 @@ impl UnityStoreFactoryBuilder {
             Some(auth_type) => auth_type,
             None => match self.detect_auth_type(url) {
                 Some(auth_type) => auth_type,
-                None if self.allow_unauthenticated => UnityAuthType::None,
+                None if self.auth.allow_unauthenticated => UnityAuthType::None,
                 None => {
                     return Err(Error::InvalidConfig(
                         "no Unity Catalog credentials configured: set `unity_token`, \
@@ -820,7 +931,7 @@ impl UnityStoreFactoryBuilder {
                     provider = auth.token_exchange(TokenExchange {
                         endpoint,
                         subject: provider,
-                        subject_token_type: self.token_exchange_subject_token_type.clone(),
+                        subject_token_type: self.auth.token_exchange_subject_token_type.clone(),
                         requested_token_type: None,
                         audience: None,
                         scope: None,
@@ -839,16 +950,16 @@ impl UnityStoreFactoryBuilder {
     /// The authentication type implied by the configuration, if any; see
     /// [`UnityAuthType`] for the order.
     fn detect_auth_type(&self, url: &Url) -> Option<UnityAuthType> {
-        let has_client = self.client_id.is_some() && self.client_secret.is_some();
-        if self.token.is_some() {
+        let has_client = self.auth.client_id.is_some() && self.auth.client_secret.is_some();
+        if self.auth.token.is_some() {
             Some(UnityAuthType::Bearer)
-        } else if has_client && self.oauth_token_url.is_some() {
+        } else if has_client && self.auth.oauth_token_url.is_some() {
             Some(UnityAuthType::OAuthClientCredentials)
         } else if has_client && self.tenant_id().is_some() {
             Some(UnityAuthType::AzureClientSecret)
-        } else if self.token_file.is_some() {
+        } else if self.auth.token_file.is_some() {
             Some(UnityAuthType::TokenFile)
-        } else if self.token_env.is_some() {
+        } else if self.auth.token_env.is_some() {
             Some(UnityAuthType::TokenEnv)
         } else if self.databricks_configured(url) {
             Some(UnityAuthType::Databricks)
@@ -885,7 +996,7 @@ impl UnityStoreFactoryBuilder {
                 return Some(UnityAuthType::AzureManagedIdentity);
             }
         }
-        if self.oauth_audience.is_some() && !self.google.is_empty() {
+        if self.auth.oauth_audience.is_some() && !self.google.is_empty() {
             return Some(UnityAuthType::GcpIdToken);
         }
         None
@@ -894,12 +1005,10 @@ impl UnityStoreFactoryBuilder {
     /// Whether Databricks credentials are configured: explicitly, or — for a
     /// Databricks workspace — through `DATABRICKS_*` variables or a profile.
     fn databricks_configured(&self, url: &Url) -> bool {
-        let explicit = self.databricks.iter().any(|(key, _)| {
-            !matches!(
-                key,
-                DatabricksConfigKey::Client(_) | DatabricksConfigKey::Host
-            )
-        });
+        let explicit = self
+            .databricks
+            .iter()
+            .any(|(key, _)| *key != DatabricksConfigKey::Host);
         explicit
             || (self.databricks_from_env
                 && self.databricks_target(url)
@@ -923,8 +1032,9 @@ impl UnityStoreFactoryBuilder {
     /// Unity-specific secret is set, which must not pair with another
     /// identity's id.
     fn client_id(&self) -> Option<String> {
-        self.client_id.clone().or_else(|| {
-            self.client_secret
+        self.auth.client_id.clone().or_else(|| {
+            self.auth
+                .client_secret
                 .is_none()
                 .then(|| self.azure.get(&AzureIdentityKey::ClientId).cloned())
                 .flatten()
@@ -933,8 +1043,9 @@ impl UnityStoreFactoryBuilder {
 
     /// The client secret, paired like [`client_id`](Self::client_id).
     fn client_secret(&self) -> Option<String> {
-        self.client_secret.clone().or_else(|| {
-            self.client_id
+        self.auth.client_secret.clone().or_else(|| {
+            self.auth
+                .client_id
                 .is_none()
                 .then(|| self.azure.get(&AzureIdentityKey::ClientSecret).cloned())
                 .flatten()
@@ -942,13 +1053,15 @@ impl UnityStoreFactoryBuilder {
     }
 
     fn tenant_id(&self) -> Option<String> {
-        self.azure_tenant_id
+        self.auth
+            .azure_tenant_id
             .clone()
             .or_else(|| self.azure.get(&AzureIdentityKey::TenantId).cloned())
     }
 
     fn authority_host(&self) -> Option<String> {
-        self.azure_authority_host
+        self.auth
+            .azure_authority_host
             .clone()
             .or_else(|| self.azure.get(&AzureIdentityKey::AuthorityHost).cloned())
     }
@@ -956,13 +1069,13 @@ impl UnityStoreFactoryBuilder {
     /// The Azure AD scope of Unity Catalog: configured, or that of Azure
     /// Databricks for one of its workspaces.
     fn oauth_scope(&self, url: &Url) -> Option<String> {
-        self.oauth_scope.clone().or_else(|| {
+        self.auth.oauth_scope.clone().or_else(|| {
             host_in(url, AZURE_DATABRICKS_DOMAINS).then(|| AZURE_DATABRICKS_SCOPE.to_string())
         })
     }
 
     fn token_exchange_endpoint(&self, url: &Url) -> Result<Option<String>> {
-        let Some(value) = &self.token_exchange else {
+        let Some(value) = &self.auth.token_exchange else {
             return Ok(None);
         };
         if value.contains("://") {
@@ -1008,37 +1121,46 @@ impl UnityStoreFactoryBuilder {
         };
         use AzureIdentityKey as Azure;
         let client_id_keys = [
-            UnityConfigKey::ClientId,
+            UnityConfigKey::Auth(AuthConfigKey::ClientId),
             UnityConfigKey::Azure(Azure::ClientId),
         ];
         let client_secret_keys = [
-            UnityConfigKey::ClientSecret,
+            UnityConfigKey::Auth(AuthConfigKey::ClientSecret),
             UnityConfigKey::Azure(Azure::ClientSecret),
         ];
         let tenant_keys = [
-            UnityConfigKey::AzureTenantId,
+            UnityConfigKey::Auth(AuthConfigKey::AzureTenantId),
             UnityConfigKey::Azure(Azure::TenantId),
         ];
-        let scope = || required(self.oauth_scope(url), &[UnityConfigKey::OAuthScope]);
+        let scope = || {
+            required(
+                self.oauth_scope(url),
+                &[UnityConfigKey::Auth(AuthConfigKey::OAuthScope)],
+            )
+        };
         let azure = |key| self.azure.get(&key).cloned();
 
         let provider = match auth_type {
-            UnityAuthType::Bearer => {
-                BearerAuth::static_token(required(self.token.clone(), &[UnityConfigKey::Token])?)
-            }
+            UnityAuthType::Bearer => BearerAuth::static_token(required(
+                self.auth.token.clone(),
+                &[UnityConfigKey::Auth(AuthConfigKey::Token)],
+            )?),
             UnityAuthType::OAuthClientCredentials => {
                 auth.client_credentials(ClientCredentials {
                     token_url: required(
-                        self.oauth_token_url.clone(),
-                        &[UnityConfigKey::OAuthTokenUrl],
+                        self.auth.oauth_token_url.clone(),
+                        &[UnityConfigKey::Auth(AuthConfigKey::OAuthTokenUrl)],
                     )?,
-                    client_id: required(self.client_id.clone(), &[UnityConfigKey::ClientId])?,
+                    client_id: required(
+                        self.auth.client_id.clone(),
+                        &[UnityConfigKey::Auth(AuthConfigKey::ClientId)],
+                    )?,
                     client_secret: required(
-                        self.client_secret.clone(),
-                        &[UnityConfigKey::ClientSecret],
+                        self.auth.client_secret.clone(),
+                        &[UnityConfigKey::Auth(AuthConfigKey::ClientSecret)],
                     )?,
-                    scope: self.oauth_scope.clone(),
-                    audience: self.oauth_audience.clone(),
+                    scope: self.auth.oauth_scope.clone(),
+                    audience: self.auth.oauth_audience.clone(),
                 })?
             }
             UnityAuthType::AzureClientSecret => auth.azure_client_secret(
@@ -1063,11 +1185,12 @@ impl UnityStoreFactoryBuilder {
                 &required(self.tenant_id(), &tenant_keys)?,
                 required(self.client_id(), &client_id_keys)?,
                 required(
-                    self.token_file
+                    self.auth
+                        .token_file
                         .clone()
                         .or_else(|| azure(Azure::FederatedTokenFile)),
                     &[
-                        UnityConfigKey::TokenFile,
+                        UnityConfigKey::Auth(AuthConfigKey::TokenFile),
                         UnityConfigKey::Azure(Azure::FederatedTokenFile),
                     ],
                 )?,
@@ -1077,6 +1200,7 @@ impl UnityStoreFactoryBuilder {
             UnityAuthType::AzureCli => auth.azure_cli(scope()?),
             UnityAuthType::GcpIdToken => {
                 let audience = self
+                    .auth
                     .oauth_audience
                     .clone()
                     .unwrap_or_else(|| url.origin().ascii_serialization());
@@ -1094,12 +1218,12 @@ impl UnityStoreFactoryBuilder {
                 }
             }
             UnityAuthType::TokenFile => auth.token_file(required(
-                self.token_file.clone(),
-                &[UnityConfigKey::TokenFile],
+                self.auth.token_file.clone(),
+                &[UnityConfigKey::Auth(AuthConfigKey::TokenFile)],
             )?),
             UnityAuthType::TokenEnv => auth.token_env(required(
-                self.token_env.clone(),
-                &[UnityConfigKey::TokenEnv],
+                self.auth.token_env.clone(),
+                &[UnityConfigKey::Auth(AuthConfigKey::TokenEnv)],
             )?),
             UnityAuthType::Databricks | UnityAuthType::None => {
                 unreachable!("not a bearer flow")
@@ -1118,9 +1242,7 @@ impl UnityStoreFactoryBuilder {
             .with_client_options(self.http_options(url))
             .with_retry(self.retry.clone());
         for (key, value) in &self.databricks {
-            if !matches!(key, DatabricksConfigKey::Client(_)) {
-                builder = builder.with_config(*key, value);
-            }
+            builder = builder.with_config(*key, value);
         }
         if self.databricks_value(DatabricksConfigKey::Host).is_none() {
             // OAuth flows resolve their token endpoint against the workspace
@@ -1149,29 +1271,21 @@ fn host_in(url: &Url, domains: &[&str]) -> bool {
     })
 }
 
-fn allow_http_key() -> DatabricksConfigKey {
-    DatabricksConfigKey::Client(ClientConfigKey::AllowHttp)
-}
-
 impl fmt::Debug for UnityStoreFactoryBuilder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let set = |value: &Option<String>| value.as_ref().map(|_| "***");
         // Secrets (tokens, client secrets, option values) are never printed.
         f.debug_struct("UnityStoreFactoryBuilder")
             .field("url", &self.url)
             .field("aws_region", &self.aws_region)
-            .field("allow_unauthenticated", &self.allow_unauthenticated)
-            .field("auth_type", &self.auth_type)
-            .field("token", &set(&self.token))
-            .field("client_id", &self.client_id)
-            .field("client_secret", &set(&self.client_secret))
-            .field("oauth_token_url", &self.oauth_token_url)
-            .field("oauth_scope", &self.oauth_scope)
-            .field("oauth_audience", &self.oauth_audience)
-            .field("azure_tenant_id", &self.azure_tenant_id)
-            .field("token_file", &self.token_file)
-            .field("token_env", &self.token_env)
-            .field("token_exchange", &self.token_exchange)
+            .field(
+                "client_config",
+                &self
+                    .client_config
+                    .iter()
+                    .map(|(key, _)| key.as_ref())
+                    .collect::<Vec<_>>(),
+            )
+            .field("auth", &self.auth)
             .field(
                 "azure",
                 &self
@@ -1219,20 +1333,20 @@ mod tests {
         for key in [
             UnityConfigKey::Url,
             UnityConfigKey::AwsRegion,
-            UnityConfigKey::AllowUnauthenticated,
-            UnityConfigKey::AuthType,
-            UnityConfigKey::Token,
-            UnityConfigKey::ClientId,
-            UnityConfigKey::ClientSecret,
-            UnityConfigKey::OAuthTokenUrl,
-            UnityConfigKey::OAuthScope,
-            UnityConfigKey::OAuthAudience,
-            UnityConfigKey::AzureTenantId,
-            UnityConfigKey::AzureAuthorityHost,
-            UnityConfigKey::TokenFile,
-            UnityConfigKey::TokenEnv,
-            UnityConfigKey::TokenExchange,
-            UnityConfigKey::TokenExchangeSubjectTokenType,
+            UnityConfigKey::Auth(AuthConfigKey::AllowUnauthenticated),
+            UnityConfigKey::Auth(AuthConfigKey::AuthType),
+            UnityConfigKey::Auth(AuthConfigKey::Token),
+            UnityConfigKey::Auth(AuthConfigKey::ClientId),
+            UnityConfigKey::Auth(AuthConfigKey::ClientSecret),
+            UnityConfigKey::Auth(AuthConfigKey::OAuthTokenUrl),
+            UnityConfigKey::Auth(AuthConfigKey::OAuthScope),
+            UnityConfigKey::Auth(AuthConfigKey::OAuthAudience),
+            UnityConfigKey::Auth(AuthConfigKey::AzureTenantId),
+            UnityConfigKey::Auth(AuthConfigKey::AzureAuthorityHost),
+            UnityConfigKey::Auth(AuthConfigKey::TokenFile),
+            UnityConfigKey::Auth(AuthConfigKey::TokenEnv),
+            UnityConfigKey::Auth(AuthConfigKey::TokenExchange),
+            UnityConfigKey::Auth(AuthConfigKey::TokenExchangeSubjectTokenType),
             UnityConfigKey::Azure(AzureIdentityKey::ClientId),
             UnityConfigKey::Azure(AzureIdentityKey::ClientSecret),
             UnityConfigKey::Azure(AzureIdentityKey::TenantId),
@@ -1270,6 +1384,17 @@ mod tests {
         assert_eq!(
             "token".parse::<UnityConfigKey>().unwrap(),
             UnityConfigKey::Databricks(DatabricksConfigKey::Token)
+        );
+        // HTTP client options are generic, with or without a Databricks prefix.
+        for alias in ["allow_http", "databricks_allow_http"] {
+            assert_eq!(
+                alias.parse::<UnityConfigKey>().unwrap(),
+                UnityConfigKey::Client(ClientConfigKey::AllowHttp)
+            );
+        }
+        assert_eq!(
+            "unity_access_token".parse::<UnityConfigKey>().unwrap(),
+            UnityConfigKey::Auth(AuthConfigKey::Token)
         );
         assert!(matches!(
             "definitely_not_a_key".parse::<UnityConfigKey>(),
@@ -1355,6 +1480,12 @@ mod tests {
         );
         // Only client options are not Databricks credentials.
         let options = UnityStoreFactoryBuilder::new().with_options([("allow_http", "true")]);
+        assert_eq!(
+            options
+                .get_config_value(&UnityConfigKey::Client(ClientConfigKey::AllowHttp))
+                .as_deref(),
+            Some("true")
+        );
         assert_eq!(detect(options), None);
     }
 

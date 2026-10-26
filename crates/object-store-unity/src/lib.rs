@@ -115,7 +115,8 @@ mod routing;
 mod store;
 
 pub use builder::{
-    AzureIdentityKey, GoogleIdentityKey, UnityAuthType, UnityConfigKey, UnityStoreFactoryBuilder,
+    AuthConfigKey, AzureIdentityKey, GoogleIdentityKey, UnityAuthType, UnityConfigKey,
+    UnityStoreFactoryBuilder,
 };
 pub use client::UnityClient;
 pub use credential::CredentialVendor;
