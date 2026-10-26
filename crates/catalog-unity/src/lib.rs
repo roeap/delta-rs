@@ -12,7 +12,9 @@ use deltalake_core::logstore::{
     LogStore, LogStoreFactory, StorageConfig, default_logstore, logstore_factories,
     object_store::RetryConfig,
 };
-use object_store_unity::{AuthConfigKey, UnityConfigKey, UnityStoreFactoryBuilder};
+use object_store_unity::{
+    AuthConfigKey, AzureIdentityKey, UnityConfigKey, UnityStoreFactoryBuilder,
+};
 use olai_http::bearer::BearerCredential;
 use olai_http::databricks::DatabricksConfigKey;
 use olai_http::{CloudClient, CloudRequestBuilder, SendRawError};
@@ -448,6 +450,12 @@ pub struct UnityCatalogBuilder {
     /// and [`Self::from_env`].
     #[builder(default)]
     unity_options: Vec<(String, String)>,
+
+    /// Whether `object_store_unity` also reads the environment, as set by
+    /// [`Self::from_env`]: the workload's `AZURE_*` / `GOOGLE_*` identity and,
+    /// for a Databricks workspace, `.databrickscfg` profiles.
+    #[builder(default)]
+    read_env: bool,
 }
 
 #[allow(deprecated)]
@@ -506,7 +514,7 @@ impl UnityCatalogBuilder {
     ///
     /// Environment keys prefixed with "UNITY_" or "DATABRICKS_" will be considered
     pub fn from_env() -> Self {
-        let mut builder = Self::builder().build();
+        let mut builder = Self::builder().read_env(true).build();
         for (os_key, os_value) in std::env::vars_os() {
             if let (Some(key), Some(value)) = (os_key.to_str(), os_value.to_str())
                 && (key.starts_with("UNITY_") || key.starts_with("DATABRICKS_"))
@@ -640,13 +648,20 @@ impl UnityCatalogBuilder {
     /// Azure CLI. A service principal and the Azure CLI target the Databricks
     /// workspace (OAuth M2M, or Azure AD for Azure Databricks with a tenant)
     /// unless `unity_oauth_token_url` or `unity_oauth_scope` points them at
-    /// another identity provider. Further `unity_*` options (token files,
+    /// another identity provider. A client id without a secret, the MSI keys
+    /// and the federated token file describe the workload's Azure identity
+    /// (`azure_*` in `object_store_unity`). Further options (token files,
     /// token exchange, …) apply as documented in `object_store_unity`.
     fn unity_store_builder(
         &mut self,
         catalog_url: &str,
     ) -> DataCatalogResult<UnityStoreFactoryBuilder> {
-        let mut builder = UnityStoreFactoryBuilder::new()
+        let builder = if self.read_env {
+            UnityStoreFactoryBuilder::from_env()
+        } else {
+            UnityStoreFactoryBuilder::new()
+        };
+        let mut builder = builder
             .with_url(catalog_url)
             .with_client_options(self.client_options.olai_options())
             .with_retry(self.client_options.olai_retry())
@@ -710,6 +725,32 @@ impl UnityCatalogBuilder {
             } else {
                 builder.with_config(databricks(DatabricksConfigKey::AuthType), "azure-cli")
             };
+        }
+
+        let azure = |key| UnityConfigKey::Azure(key);
+        if self.client_secret.is_none() {
+            for (key, value) in [
+                (AzureIdentityKey::ClientId, &self.client_id),
+                (AzureIdentityKey::TenantId, &self.authority_id),
+                (AzureIdentityKey::AuthorityHost, &self.authority_host),
+            ] {
+                if let Some(value) = value {
+                    builder = builder.with_config(azure(key), value);
+                }
+            }
+        }
+        for (key, value) in [
+            (AzureIdentityKey::MsiEndpoint, &self.msi_endpoint),
+            (AzureIdentityKey::ObjectId, &self.object_id),
+            (AzureIdentityKey::MsiResourceId, &self.msi_resource_id),
+            (
+                AzureIdentityKey::FederatedTokenFile,
+                &self.federated_token_file,
+            ),
+        ] {
+            if let Some(value) = value {
+                builder = builder.with_config(azure(key), value);
+            }
         }
         Ok(builder)
     }
@@ -1691,6 +1732,45 @@ mod tests {
             .unwrap();
         client.list_catalogs().await.unwrap();
         exchange.assert_async().await;
+        catalogs.assert_async().await;
+    }
+
+    /// The legacy managed-identity keys select the workload's Azure identity.
+    #[tokio::test]
+    async fn test_managed_identity_keys_authenticate() {
+        let server = MockServer::start_async().await;
+        let imds = server
+            .mock_async(|when, then| {
+                when.path("/msi/token")
+                    .query_param("resource", "api://my-catalog")
+                    .query_param("client_id", "uami");
+                then.body(
+                    r#"{"access_token": "msi-token", "expires_in": "3600", "expires_on": "4102444800"}"#,
+                );
+            })
+            .await;
+        let catalogs = server
+            .mock_async(|when, then| {
+                when.path("/api/2.1/unity-catalog/catalogs")
+                    .header("authorization", "Bearer msi-token");
+                then.body(r#"{"catalogs": []}"#);
+            })
+            .await;
+
+        let client = UnityCatalogBuilder::builder()
+            .workspace_url(server.url(""))
+            .allow_http_url(true)
+            .build()
+            .try_with_options([
+                ("unity_client_id", "uami".to_string()),
+                ("unity_msi_endpoint", server.url("/msi/token")),
+                ("unity_oauth_scope", "api://my-catalog/.default".to_string()),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+        client.list_catalogs().await.unwrap();
+        imds.assert_async().await;
         catalogs.assert_async().await;
     }
 
