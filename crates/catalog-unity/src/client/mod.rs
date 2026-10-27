@@ -77,6 +77,65 @@ pub struct ClientOptions {
 }
 
 impl ClientOptions {
+    /// The equivalent `olai_http` client options, used for Unity Catalog
+    /// requests.
+    pub(crate) fn olai_options(&self) -> olai_http::ClientOptions {
+        let mut options = olai_http::ClientOptions::new()
+            .with_user_agent(
+                self.user_agent
+                    .clone()
+                    .unwrap_or_else(|| HeaderValue::from_static(DEFAULT_USER_AGENT)),
+            )
+            .with_allow_http(self.allow_http)
+            .with_allow_invalid_certificates(self.allow_insecure);
+        if let Some(headers) = &self.default_headers {
+            options = options.with_default_headers(headers.clone());
+        }
+        if let Some(proxy) = &self.proxy_url {
+            options = options.with_proxy_url(proxy);
+        }
+        if let Some(timeout) = self.timeout {
+            options = options.with_timeout(timeout);
+        }
+        if let Some(timeout) = self.connect_timeout {
+            options = options.with_connect_timeout(timeout);
+        }
+        if let Some(timeout) = self.pool_idle_timeout {
+            options = options.with_pool_idle_timeout(timeout);
+        }
+        if let Some(max) = self.pool_max_idle_per_host {
+            options = options.with_pool_max_idle_per_host(max);
+        }
+        if let Some(interval) = self.http2_keep_alive_interval {
+            options = options.with_http2_keep_alive_interval(interval);
+        }
+        if let Some(timeout) = self.http2_keep_alive_timeout {
+            options = options.with_http2_keep_alive_timeout(timeout);
+        }
+        if self.http2_keep_alive_while_idle {
+            options = options.with_http2_keep_alive_while_idle();
+        }
+        if self.http1_only {
+            options = options.with_http1_only();
+        }
+        if self.http2_only {
+            options = options.with_http2_only();
+        }
+        options
+    }
+
+    /// The equivalent `olai_http` retry policy. Without an explicit
+    /// configuration this keeps the previous default of 3 retries.
+    pub(crate) fn olai_retry(&self) -> olai_http::RetryConfig {
+        match &self.retry_config {
+            Some(retry) => retry.into(),
+            None => olai_http::RetryConfig {
+                max_retries: 3,
+                ..Default::default()
+            },
+        }
+    }
+
     pub(crate) fn client(&self) -> DataCatalogResult<ClientWithMiddleware> {
         let mut builder = ClientBuilder::new();
 

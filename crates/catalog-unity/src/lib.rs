@@ -1,6 +1,6 @@
 #![warn(clippy::all)]
 #![warn(rust_2018_idioms)]
-//! Databricks Unity Catalog.
+//! Unity Catalog for Delta Lake, hosted on Databricks or deployed from OSS.
 #[cfg(not(any(feature = "aws", feature = "azure", feature = "gcp", feature = "r2")))]
 compile_error!(
     "At least one of the following crate features `aws`, `azure`, `gcp`, or `r2` must be enabled \
@@ -12,8 +12,15 @@ use deltalake_core::logstore::{
     LogStore, LogStoreFactory, StorageConfig, default_logstore, logstore_factories,
     object_store::RetryConfig,
 };
+use object_store_unity::{
+    AuthConfigKey, AzureIdentityKey, UnityConfigKey, UnityStoreFactoryBuilder,
+};
+use olai_http::bearer::BearerCredential;
+use olai_http::databricks::DatabricksConfigKey;
+use olai_http::{CloudClient, CloudRequestBuilder, SendRawError};
 use reqwest::Url;
-use reqwest::header::{AUTHORIZATION, HeaderValue, InvalidHeaderValue};
+use reqwest::header::InvalidHeaderValue;
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
@@ -22,10 +29,8 @@ use std::sync::Arc;
 use tracing::instrument;
 use typed_builder::TypedBuilder;
 
-use crate::credential::{
-    AzureCliCredential, ClientSecretOAuthProvider, CredentialProvider, TokenCredential,
-    WorkspaceOAuthProvider,
-};
+use crate::client::token::TokenCache;
+use crate::credential::TokenCredential;
 use crate::models::{
     ErrorResponse, GetSchemaResponse, GetTableResponse, ListCatalogsResponse, ListSchemasResponse,
     ListTableSummariesResponse, Table, TableTempCredentialsResponse, TableType,
@@ -145,6 +150,22 @@ pub enum UnityCatalogError {
 
     #[error("Error received from Unity Catalog: {0}")]
     UnityCatalogClientError(#[from] Error),
+
+    /// Authenticating or sending a Unity Catalog request failed.
+    #[error("Unity Catalog request failed: {0}")]
+    Http(#[from] olai_http::Error),
+
+    /// Unity Catalog answered with an error status and no parsable body.
+    #[error("Unity Catalog request failed: {0}")]
+    HttpStatus(olai_http::RetryError),
+
+    /// A Unity Catalog response could not be decoded.
+    #[error("Invalid Unity Catalog response: {0}")]
+    InvalidResponse(#[from] serde_json::Error),
+
+    /// Authenticating, vending credentials, or building a store failed.
+    #[error("Unity Catalog storage error: {0}")]
+    Storage(#[from] object_store_unity::Error),
 }
 
 impl From<ErrorResponse> for UnityCatalogError {
@@ -423,6 +444,18 @@ pub struct UnityCatalogBuilder {
     /// When set, this token credential will be used for acquiring access tokens
     #[builder(default)]
     token_credential: Option<Box<dyn TokenCredential>>,
+
+    /// Further `object_store_unity` options (e.g. `unity_token_file`,
+    /// `unity_oauth_token_url`), collected from [`Self::try_with_options`]
+    /// and [`Self::from_env`].
+    #[builder(default)]
+    unity_options: Vec<(String, String)>,
+
+    /// Whether `object_store_unity` also reads the environment, as set by
+    /// [`Self::from_env`]: the workload's `AZURE_*` / `GOOGLE_*` identity and,
+    /// for a Databricks workspace, `.databrickscfg` profiles.
+    #[builder(default)]
+    read_env: bool,
 }
 
 #[allow(deprecated)]
@@ -467,10 +500,12 @@ impl UnityCatalogBuilder {
         options: I,
     ) -> DataCatalogResult<Self> {
         for (key, value) in options {
-            if UnityCatalogConfigKey::from_str(key.as_ref()).is_err() {
-                continue;
+            if UnityCatalogConfigKey::from_str(key.as_ref()).is_ok() {
+                self = self.try_with_option(key, value)?;
+            } else if UnityConfigKey::from_str(key.as_ref()).is_ok() {
+                self.unity_options
+                    .push((key.as_ref().to_string(), value.into()));
             }
-            self = self.try_with_option(key, value)?;
         }
         Ok(self)
     }
@@ -479,7 +514,7 @@ impl UnityCatalogBuilder {
     ///
     /// Environment keys prefixed with "UNITY_" or "DATABRICKS_" will be considered
     pub fn from_env() -> Self {
-        let mut builder = Self::builder().build();
+        let mut builder = Self::builder().read_env(true).build();
         for (os_key, os_value) in std::env::vars_os() {
             if let (Some(key), Some(value)) = (os_key.to_str(), os_value.to_str())
                 && (key.starts_with("UNITY_") || key.starts_with("DATABRICKS_"))
@@ -492,6 +527,10 @@ impl UnityCatalogBuilder {
                         tracing::debug!("Trying: {key}");
                     }
                     builder = builder.try_with_option(config_key, value).unwrap();
+                } else if UnityConfigKey::from_str(&key.to_ascii_lowercase()).is_ok() {
+                    builder
+                        .unity_options
+                        .push((key.to_ascii_lowercase(), value.to_string()));
                 }
             }
         }
@@ -601,77 +640,142 @@ impl UnityCatalogBuilder {
         Ok((storage_location, credentials))
     }
 
-    fn get_credential_provider(&mut self) -> Option<CredentialProvider> {
-        if let Some(token_credential) = self.token_credential.take() {
-            return Some(CredentialProvider::TokenCredential(
-                Default::default(),
-                token_credential,
-            ));
+    /// The `object_store_unity` configuration for this builder's
+    /// authentication, which [`UnityCatalog`] and its stores share.
+    ///
+    /// The builder's own keys keep their meaning: a custom
+    /// [`TokenCredential`], then a token, then a service principal, then the
+    /// Azure CLI. A service principal and the Azure CLI target the Databricks
+    /// workspace (OAuth M2M, or Azure AD for Azure Databricks with a tenant)
+    /// unless `unity_oauth_token_url` or `unity_oauth_scope` points them at
+    /// another identity provider. A client id without a secret, the MSI keys
+    /// and the federated token file describe the workload's Azure identity
+    /// (`azure_*` in `object_store_unity`). Further options (token files,
+    /// token exchange, …) apply as documented in `object_store_unity`.
+    fn unity_store_builder(
+        &mut self,
+        catalog_url: &str,
+    ) -> DataCatalogResult<UnityStoreFactoryBuilder> {
+        let builder = if self.read_env {
+            UnityStoreFactoryBuilder::from_env()
+        } else {
+            UnityStoreFactoryBuilder::new()
+        };
+        let mut builder = builder
+            .with_url(catalog_url)
+            .with_client_options(self.client_options.olai_options())
+            .with_retry(self.client_options.olai_retry())
+            .with_options(self.unity_options.clone());
+
+        if let Some(credential) = self.token_credential.take() {
+            let bridge = TokenCredentialBridge {
+                credential,
+                client: self.client_options.client()?,
+                cache: TokenCache::default(),
+            };
+            let client = CloudClient::new_with_bearer(
+                Arc::new(bridge),
+                &self.client_options.olai_options(),
+                self.client_options.olai_retry(),
+                None,
+            )
+            .map_err(UnityCatalogError::from)?;
+            return Ok(builder.with_client(client));
+        }
+        if let Some(token) = &self.bearer_token {
+            return Ok(builder.with_token(token));
         }
 
-        if let Some(token) = self.bearer_token.as_ref() {
-            return Some(CredentialProvider::BearerToken(token.clone()));
+        let neutral = self.unity_options.iter().any(|(key, _)| {
+            matches!(
+                UnityConfigKey::from_str(key),
+                Ok(UnityConfigKey::Auth(AuthConfigKey::OAuthTokenUrl)
+                    | UnityConfigKey::Auth(AuthConfigKey::OAuthScope))
+            )
+        });
+        let databricks = |key| UnityConfigKey::Databricks(key);
+        if let (Some(client_id), Some(client_secret)) = (&self.client_id, &self.client_secret) {
+            let (id, secret, tenant, authority) = if neutral {
+                (
+                    UnityConfigKey::Auth(AuthConfigKey::ClientId),
+                    UnityConfigKey::Auth(AuthConfigKey::ClientSecret),
+                    UnityConfigKey::Auth(AuthConfigKey::AzureTenantId),
+                    UnityConfigKey::Auth(AuthConfigKey::AzureAuthorityHost),
+                )
+            } else {
+                (
+                    databricks(DatabricksConfigKey::ClientId),
+                    databricks(DatabricksConfigKey::ClientSecret),
+                    databricks(DatabricksConfigKey::AzureTenantId),
+                    databricks(DatabricksConfigKey::AzureAuthorityHost),
+                )
+            };
+            builder = builder
+                .with_config(id, client_id)
+                .with_config(secret, client_secret);
+            if let Some(tenant_id) = &self.authority_id {
+                builder = builder.with_config(tenant, tenant_id);
+            }
+            if let Some(host) = &self.authority_host {
+                builder = builder.with_config(authority, host);
+            }
+        } else if self.use_azure_cli {
+            builder = if neutral {
+                builder.with_config(UnityConfigKey::Auth(AuthConfigKey::AuthType), "azure-cli")
+            } else {
+                builder.with_config(databricks(DatabricksConfigKey::AuthType), "azure-cli")
+            };
         }
 
-        if let (Some(client_id), Some(client_secret), Some(workspace_host)) =
-            (&self.client_id, &self.client_secret, &self.workspace_url)
-        {
-            return Some(CredentialProvider::TokenCredential(
-                Default::default(),
-                Box::new(WorkspaceOAuthProvider::new(
-                    client_id,
-                    client_secret,
-                    workspace_host,
-                )),
-            ));
+        let azure = |key| UnityConfigKey::Azure(key);
+        if self.client_secret.is_none() {
+            for (key, value) in [
+                (AzureIdentityKey::ClientId, &self.client_id),
+                (AzureIdentityKey::TenantId, &self.authority_id),
+                (AzureIdentityKey::AuthorityHost, &self.authority_host),
+            ] {
+                if let Some(value) = value {
+                    builder = builder.with_config(azure(key), value);
+                }
+            }
         }
-
-        if let (Some(client_id), Some(client_secret), Some(authority_id)) = (
-            self.client_id.as_ref(),
-            self.client_secret.as_ref(),
-            self.authority_id.as_ref(),
-        ) {
-            return Some(CredentialProvider::TokenCredential(
-                Default::default(),
-                Box::new(ClientSecretOAuthProvider::new(
-                    client_id,
-                    client_secret,
-                    authority_id,
-                    self.authority_host.as_ref(),
-                )),
-            ));
+        for (key, value) in [
+            (AzureIdentityKey::MsiEndpoint, &self.msi_endpoint),
+            (AzureIdentityKey::ObjectId, &self.object_id),
+            (AzureIdentityKey::MsiResourceId, &self.msi_resource_id),
+            (
+                AzureIdentityKey::FederatedTokenFile,
+                &self.federated_token_file,
+            ),
+        ] {
+            if let Some(value) = value {
+                builder = builder.with_config(azure(key), value);
+            }
         }
-        if self.use_azure_cli {
-            return Some(CredentialProvider::TokenCredential(
-                Default::default(),
-                Box::new(AzureCliCredential::new()),
-            ));
-        }
-
-        None
+        Ok(builder)
     }
 
     /// Build an instance of [`UnityCatalog`]
     pub fn build(mut self) -> DataCatalogResult<UnityCatalog> {
-        let credential = self
-            .get_credential_provider()
-            .ok_or(UnityCatalogError::MissingCredential)?;
-
         let workspace_url = self
             .workspace_url
+            .clone()
             .ok_or(UnityCatalogError::MissingConfiguration(
                 "workspace_url".into(),
             ))?
             .trim_end_matches('/')
             .to_string();
 
-        let mut client_options = self.client_options;
         if self.allow_http_url {
-            client_options.allow_http = true;
+            self.client_options.allow_http = true;
         }
-        let client = client_options.client()?;
+        let catalog_url = format!("{workspace_url}/api/2.1/unity-catalog/");
+        let (client, _) = self
+            .unity_store_builder(&catalog_url)?
+            .build_client()
+            .map_err(UnityCatalogError::from)?;
 
-        let cc_client = if let CredentialProvider::BearerToken(ref token) = credential {
+        let cc_client = if let Some(token) = &self.bearer_token {
             let config = ClientConfig::build(workspace_url.clone(), token)
                 .build()
                 .map_err(UnityCatalogError::from)?;
@@ -684,39 +788,59 @@ impl UnityCatalogBuilder {
             client,
             cc_client,
             workspace_url,
-            credential,
             table_cache: DashMap::new(),
         })
     }
 }
 
-/// Databricks Unity Catalog
-
-pub struct UnityCatalog {
+/// Serves a custom [`TokenCredential`] as an `olai_http` credential provider.
+#[derive(Debug)]
+struct TokenCredentialBridge {
+    credential: Box<dyn TokenCredential>,
     client: reqwest_middleware::ClientWithMiddleware,
+    cache: TokenCache<String>,
+}
+
+#[async_trait::async_trait]
+impl olai_http::CredentialProvider for TokenCredentialBridge {
+    type Credential = BearerCredential;
+
+    async fn get_credential(&self) -> olai_http::Result<Arc<BearerCredential>> {
+        let token = self
+            .cache
+            .get_or_insert_with(|| self.credential.fetch_token(&self.client))
+            .await
+            .map_err(|e| olai_http::Error::Generic {
+                source: Box::new(e),
+            })?;
+        Ok(Arc::new(BearerCredential { token }))
+    }
+}
+
+/// A Unity Catalog client, for Databricks or OSS Unity Catalog.
+pub struct UnityCatalog {
+    client: CloudClient,
     cc_client: Option<UCDeltaTableClient>,
-    credential: CredentialProvider,
     workspace_url: String,
     table_cache: DashMap<String, GetTableResponse>,
 }
 
 impl UnityCatalog {
-    async fn get_credential(&self) -> Result<HeaderValue, UnityCatalogError> {
-        match &self.credential {
-            CredentialProvider::BearerToken(token) => {
-                // we do the conversion to a HeaderValue here, since it is fallible,
-                // and we want to use it in an infallible function
-                Ok(HeaderValue::from_str(&format!("Bearer {token}"))?)
-            }
-            CredentialProvider::TokenCredential(cache, cred) => {
-                let token = cache
-                    .get_or_insert_with(|| cred.fetch_token(&self.client))
-                    .await?;
-
-                // we do the conversion to a HeaderValue here, since it is fallible,
-                // and we want to use it in an infallible function
-                Ok(HeaderValue::from_str(&format!("Bearer {token}"))?)
-            }
+    /// Send `request` and decode its JSON body.
+    ///
+    /// Error responses are decoded too when they carry a body, so Unity
+    /// Catalog's `{error_code, message}` payloads still reach the `…Response`
+    /// enums' `Error` variants.
+    async fn send_json<T: DeserializeOwned>(
+        request: CloudRequestBuilder,
+    ) -> Result<T, UnityCatalogError> {
+        match request.send_raw().await {
+            Ok(response) => Ok(response.json().await?),
+            Err(SendRawError::Retry(error)) => match error.body() {
+                Some(body) => Ok(serde_json::from_str(body)?),
+                None => Err(UnityCatalogError::HttpStatus(error)),
+            },
+            Err(SendRawError::Sign(error)) => Err(error.into()),
         }
     }
 
@@ -735,14 +859,7 @@ impl UnityCatalog {
             "Listing catalogs: {}",
             self.catalog_url()
         );
-        let token = self.get_credential().await?;
-        let resp = self
-            .client
-            .get(format!("{}/catalogs", self.catalog_url()))
-            .header(AUTHORIZATION, token)
-            .send()
-            .await?;
-        Ok(resp.json().await?)
+        Self::send_json(self.client.get(format!("{}/catalogs", self.catalog_url()))).await
     }
 
     /// List all schemas for a catalog in the metastore.
@@ -767,15 +884,12 @@ impl UnityCatalog {
             "Listing schemas: {}",
             self.catalog_url()
         );
-        let token = self.get_credential().await?;
-        let resp = self
-            .client
-            .get(format!("{}/schemas", self.catalog_url()))
-            .header(AUTHORIZATION, token)
-            .query(&[("catalog_name", catalog_name.into())])
-            .send()
-            .await?;
-        Ok(resp.json().await?)
+        Self::send_json(
+            self.client
+                .get(format!("{}/schemas", self.catalog_url()))
+                .query(&[("catalog_name", catalog_name.into())]),
+        )
+        .await
     }
 
     /// Gets the specified schema within the metastore.#
@@ -796,19 +910,13 @@ impl UnityCatalog {
             "Getting schema: {}",
             self.catalog_url()
         );
-        let token = self.get_credential().await?;
-        let resp = self
-            .client
-            .get(format!(
-                "{}/schemas/{}.{}",
-                self.catalog_url(),
-                catalog_name.into(),
-                schema_name.into()
-            ))
-            .header(AUTHORIZATION, token)
-            .send()
-            .await?;
-        Ok(resp.json().await?)
+        Self::send_json(self.client.get(format!(
+            "{}/schemas/{}.{}",
+            self.catalog_url(),
+            catalog_name.into(),
+            schema_name.into()
+        )))
+        .await
     }
 
     /// Gets an array of summaries for tables for a schema and catalog within the metastore.
@@ -836,19 +944,15 @@ impl UnityCatalog {
             "Table Summary: {}",
             self.catalog_url()
         );
-        let token = self.get_credential().await?;
-        let resp = self
-            .client
-            .get(format!("{}/table-summaries", self.catalog_url()))
-            .query(&[
-                ("catalog_name", catalog_name.into()),
-                ("schema_name_pattern", schema_name_pattern.into()),
-            ])
-            .header(AUTHORIZATION, token)
-            .send()
-            .await?;
-
-        Ok(resp.json().await?)
+        Self::send_json(
+            self.client
+                .get(format!("{}/table-summaries", self.catalog_url()))
+                .query(&[
+                    ("catalog_name", catalog_name.into()),
+                    ("schema_name_pattern", schema_name_pattern.into()),
+                ]),
+        )
+        .await
     }
 
     /// Gets a table from the metastore for a specific catalog and schema.
@@ -881,14 +985,12 @@ impl UnityCatalog {
         } else {
             tracing::event!(tracing::Level::DEBUG, "Getting table: {}", full_path);
         }
-        let token = self.get_credential().await?;
-        let resp = self
-            .client
-            .get(format!("{}/tables/{}", self.catalog_url(), full_path))
-            .header(AUTHORIZATION, token)
-            .send()
-            .await?;
-        let table: GetTableResponse = resp.json().await?;
+        let table: GetTableResponse = Self::send_json(self.client.get(format!(
+            "{}/tables/{}",
+            self.catalog_url(),
+            full_path
+        )))
+        .await?;
         self.table_cache.insert(full_path, table.clone());
         Ok(table)
     }
@@ -929,31 +1031,27 @@ impl UnityCatalog {
     where
         S: Into<String> + Debug,
     {
-        let token = self.get_credential().await?;
         let table_info = self
             .get_table(catalog_id, database_name, table_name)
             .await?;
-        let response = match table_info {
+        match table_info {
             GetTableResponse::Success(table) => {
                 let request = TemporaryTableCredentialsRequest::new(&table.table_id, operation);
-                Ok(self
-                    .client
-                    .post(format!(
-                        "{}/temporary-table-credentials",
-                        self.catalog_url()
-                    ))
-                    .header(AUTHORIZATION, token)
-                    .json(&request)
-                    .send()
-                    .await?)
+                Self::send_json(
+                    self.client
+                        .post(format!(
+                            "{}/temporary-table-credentials",
+                            self.catalog_url()
+                        ))
+                        .json(&request),
+                )
+                .await
             }
             GetTableResponse::Error(err) => Err(UnityCatalogError::InvalidTable {
                 error_code: err.error_code,
                 message: err.message,
             }),
-        }?;
-
-        Ok(response.json().await?)
+        }
     }
 }
 
@@ -1465,6 +1563,226 @@ mod tests {
         }
     }
 
+    /// Unity Catalog error bodies still decode into the response enums.
+    #[tokio::test]
+    async fn test_error_response_body_is_decoded() {
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.path("/api/2.1/unity-catalog/tables/c.s.missing")
+                    .method("GET");
+                then.status(404).body(
+                    r#"{"error_code": "TABLE_DOES_NOT_EXIST", "message": "Table 'c.s.missing' does not exist."}"#,
+                );
+            })
+            .await;
+
+        let client = UnityCatalogBuilder::builder()
+            .workspace_url(server.url(""))
+            .bearer_token("bearer_token")
+            .client_options(ClientOptions::builder().allow_http(true).build())
+            .build()
+            .build()
+            .unwrap();
+        let response = client.get_table("c", "s", "missing").await.unwrap();
+        assert!(
+            matches!(&response, GetTableResponse::Error(e) if e.error_code == "TABLE_DOES_NOT_EXIST"),
+            "unexpected response: {response:?}"
+        );
+    }
+
+    /// A client id and secret without a tenant authenticate with Databricks
+    /// OAuth M2M against the workspace.
+    #[tokio::test]
+    async fn test_service_principal_uses_databricks_oauth() {
+        let server = MockServer::start_async().await;
+        let token = server
+            .mock_async(|when, then| {
+                when.path("/oidc/v1/token").method("POST");
+                then.body(r#"{"access_token": "m2m-token", "expires_in": 3600}"#);
+            })
+            .await;
+        let catalogs = server
+            .mock_async(|when, then| {
+                when.path("/api/2.1/unity-catalog/catalogs")
+                    .header("authorization", "Bearer m2m-token");
+                then.body(r#"{"catalogs": []}"#);
+            })
+            .await;
+
+        let client = UnityCatalogBuilder::builder()
+            .workspace_url(server.url(""))
+            .client_id("sp-id")
+            .client_secret("sp-secret")
+            .client_options(ClientOptions::builder().allow_http(true).build())
+            .build()
+            .build()
+            .unwrap();
+        client.list_catalogs().await.unwrap();
+        token.assert_async().await;
+        catalogs.assert_async().await;
+    }
+
+    /// With a tenant, a client id and secret authenticate as an Azure AD
+    /// service principal for Azure Databricks.
+    #[tokio::test]
+    async fn test_azure_service_principal_uses_azure_ad() {
+        let server = MockServer::start_async().await;
+        let aad = server
+            .mock_async(|when, then| {
+                when.path("/tenant-1/oauth2/v2.0/token").method("POST");
+                then.body(r#"{"access_token": "aad-token", "expires_in": 3600}"#);
+            })
+            .await;
+        let catalogs = server
+            .mock_async(|when, then| {
+                when.path("/api/2.1/unity-catalog/catalogs")
+                    .header("authorization", "Bearer aad-token");
+                then.body(r#"{"catalogs": []}"#);
+            })
+            .await;
+
+        let client = UnityCatalogBuilder::builder()
+            .workspace_url(server.url(""))
+            .client_id("sp-id")
+            .client_secret("sp-secret")
+            .authority_id("tenant-1")
+            .authority_host(server.url(""))
+            .client_options(ClientOptions::builder().allow_http(true).build())
+            .build()
+            .build()
+            .unwrap();
+        client.list_catalogs().await.unwrap();
+        aad.assert_async().await;
+        catalogs.assert_async().await;
+    }
+
+    /// With `unity_oauth_token_url`, the legacy client keys authenticate
+    /// against the deployment's own identity provider instead of Databricks.
+    #[tokio::test]
+    async fn test_service_principal_with_custom_identity_provider() {
+        let server = MockServer::start_async().await;
+        let token = server
+            .mock_async(|when, then| {
+                when.path("/idp/token")
+                    .method("POST")
+                    .form_urlencoded_tuple("client_id", "sp-id");
+                then.body(r#"{"access_token": "idp-token", "expires_in": 3600}"#);
+            })
+            .await;
+        let catalogs = server
+            .mock_async(|when, then| {
+                when.path("/api/2.1/unity-catalog/catalogs")
+                    .header("authorization", "Bearer idp-token");
+                then.body(r#"{"catalogs": []}"#);
+            })
+            .await;
+
+        let client = UnityCatalogBuilder::builder()
+            .workspace_url(server.url(""))
+            .allow_http_url(true)
+            .build()
+            .try_with_options([
+                ("unity_client_id", "sp-id".to_string()),
+                ("unity_client_secret", "sp-secret".to_string()),
+                ("unity_oauth_token_url", server.url("/idp/token")),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+        client.list_catalogs().await.unwrap();
+        token.assert_async().await;
+        catalogs.assert_async().await;
+    }
+
+    /// OSS Unity Catalog: an identity-provider token from a file, exchanged
+    /// at the server's token endpoint.
+    #[tokio::test]
+    async fn test_token_file_exchanged_for_unity_catalog_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_file = dir.path().join("token");
+        std::fs::write(&token_file, "idp-id-token").unwrap();
+        let server = MockServer::start_async().await;
+        let exchange = server
+            .mock_async(|when, then| {
+                when.path("/api/1.0/unity-control/auth/tokens")
+                    .method("POST")
+                    .form_urlencoded_tuple("subject_token", "idp-id-token");
+                then.body(r#"{"access_token": "uc-token", "expires_in": 3600}"#);
+            })
+            .await;
+        let catalogs = server
+            .mock_async(|when, then| {
+                when.path("/api/2.1/unity-catalog/catalogs")
+                    .header("authorization", "Bearer uc-token");
+                then.body(r#"{"catalogs": []}"#);
+            })
+            .await;
+
+        let client = UnityCatalogBuilder::builder()
+            .workspace_url(server.url(""))
+            .allow_http_url(true)
+            .build()
+            .try_with_options([
+                ("unity_token_file", token_file.to_string_lossy().to_string()),
+                ("unity_token_exchange", "true".to_string()),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+        client.list_catalogs().await.unwrap();
+        exchange.assert_async().await;
+        catalogs.assert_async().await;
+    }
+
+    /// The legacy managed-identity keys select the workload's Azure identity.
+    #[tokio::test]
+    async fn test_managed_identity_keys_authenticate() {
+        let server = MockServer::start_async().await;
+        let imds = server
+            .mock_async(|when, then| {
+                when.path("/msi/token")
+                    .query_param("resource", "api://my-catalog")
+                    .query_param("client_id", "uami");
+                then.body(
+                    r#"{"access_token": "msi-token", "expires_in": "3600", "expires_on": "4102444800"}"#,
+                );
+            })
+            .await;
+        let catalogs = server
+            .mock_async(|when, then| {
+                when.path("/api/2.1/unity-catalog/catalogs")
+                    .header("authorization", "Bearer msi-token");
+                then.body(r#"{"catalogs": []}"#);
+            })
+            .await;
+
+        let client = UnityCatalogBuilder::builder()
+            .workspace_url(server.url(""))
+            .allow_http_url(true)
+            .build()
+            .try_with_options([
+                ("unity_client_id", "uami".to_string()),
+                ("unity_msi_endpoint", server.url("/msi/token")),
+                ("unity_oauth_scope", "api://my-catalog/.default".to_string()),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+        client.list_catalogs().await.unwrap();
+        imds.assert_async().await;
+        catalogs.assert_async().await;
+    }
+
+    #[test]
+    fn test_missing_credentials_is_an_error() {
+        let result = UnityCatalogBuilder::builder()
+            .workspace_url("https://example.cloud.databricks.com")
+            .build()
+            .build();
+        assert!(result.is_err());
+    }
+
     #[tokio::test]
     async fn test_unitycatalogbuilder_with_custom_credential() {
         #[derive(Debug)]
@@ -1483,42 +1801,26 @@ mod tests {
             }
         }
 
-        let builder = UnityCatalogBuilder::builder()
-            .workspace_url("http://localhost:8080")
+        let server = MockServer::start_async().await;
+        let mock = server
+            .mock_async(|when, then| {
+                when.path("/api/2.1/unity-catalog/catalogs")
+                    .method("GET")
+                    .header("authorization", "Bearer test_credential_token");
+                then.body(r#"{"catalogs": []}"#);
+            })
+            .await;
+
+        let client = UnityCatalogBuilder::builder()
+            .workspace_url(server.url(""))
             .token_credential(Some(Box::new(TestCredential)))
-            .build();
+            .client_options(ClientOptions::builder().allow_http(true).build())
+            .build()
+            .build()
+            .unwrap();
 
-        assert!(
-            builder.token_credential.is_some(),
-            "Custom credential should be set on builder"
-        );
-
-        let mut builder_mut = builder;
-        let credential_provider = builder_mut.get_credential_provider();
-        assert!(
-            credential_provider.is_some(),
-            "Credential provider should be resolved from custom credential"
-        );
-
-        assert!(
-            matches!(
-                credential_provider.as_ref(),
-                Some(crate::credential::CredentialProvider::TokenCredential(_, _))
-            ),
-            "Expected TokenCredential variant, got BearerToken"
-        );
-
-        if let Some(crate::credential::CredentialProvider::TokenCredential(_, token_credential)) =
-            credential_provider
-        {
-            let token = token_credential
-                .fetch_token(&builder_mut.client_options.client().unwrap())
-                .await
-                .unwrap();
-            assert_eq!(
-                token.token, "test_credential_token",
-                "Fetched token should match the test credential token"
-            );
-        }
+        // The custom credential signs the request.
+        client.list_catalogs().await.unwrap();
+        mock.assert_async().await;
     }
 }
