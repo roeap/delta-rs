@@ -37,7 +37,6 @@ unity-catalog-delta-rest-client = "0.1.0"
 rand = "0.10"
 dashmap = "6"
 datafusion = { workspace = true, optional = true }
-moka = { version = "0.12", optional = true, features = ["future"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
@@ -53,7 +52,7 @@ aws = ["deltalake-aws", "object_store_unity/aws"]
 azure = ["deltalake-azure", "object_store_unity/azure"]
 gcp = ["deltalake-gcp", "object_store_unity/gcp"]
 r2 = ["deltalake-aws", "object_store_unity/aws"]
-datafusion = ["dep:datafusion", "deltalake-core/datafusion", "moka"]
+datafusion = ["dep:datafusion", "deltalake-core/datafusion"]
 
 [[example]]
 name = "uc_example"
