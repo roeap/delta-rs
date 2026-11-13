@@ -767,3 +767,21 @@ fn test_struct_scalar_with_null_collection_fields() {
     let df_scalar = crate::expressions::to_datafusion_scalar(&scalar).unwrap();
     assert_eq!(datafusion_scalar_to_scalar(&df_scalar).unwrap(), scalar);
 }
+
+#[test]
+fn test_to_junction_op_rejects_non_junction_operators() {
+    assert_eq!(
+        to_junction_op(Operator::And).unwrap(),
+        JunctionPredicateOp::And
+    );
+    assert_eq!(
+        to_junction_op(Operator::Or).unwrap(),
+        JunctionPredicateOp::Or
+    );
+    for op in [Operator::Plus, Operator::Eq, Operator::BitwiseAnd] {
+        assert!(
+            to_junction_op(op).is_err(),
+            "{op:?} must not map to a junction"
+        );
+    }
+}

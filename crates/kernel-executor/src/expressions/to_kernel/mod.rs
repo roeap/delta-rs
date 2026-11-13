@@ -118,7 +118,7 @@ pub fn to_delta_expression(expr: &Expr) -> Result<Expression> {
             let preds = flatten_junction_expr(expr, *op)?;
             Ok(Expression::Predicate(Box::new(Predicate::Junction(
                 JunctionPredicate {
-                    op: to_junction_op(*op),
+                    op: to_junction_op(*op)?,
                     preds,
                 },
             ))))
@@ -390,11 +390,11 @@ fn flatten_junction_expr(expr: &Expr, target_op: Operator) -> Result<Vec<Predica
     Ok(preds)
 }
 
-fn to_junction_op(op: Operator) -> JunctionPredicateOp {
+fn to_junction_op(op: Operator) -> Result<JunctionPredicateOp> {
     match op {
-        Operator::And => JunctionPredicateOp::And,
-        Operator::Or => JunctionPredicateOp::Or,
-        _ => unimplemented!("Unsupported operator: {:?}", op),
+        Operator::And => Ok(JunctionPredicateOp::And),
+        Operator::Or => Ok(JunctionPredicateOp::Or),
+        _ => plan_err!("Operator is not a Delta Kernel junction: {:?}", op),
     }
 }
 
