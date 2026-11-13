@@ -4,32 +4,40 @@
 //! [`to_logical_plan`] walks the nodes in order, builds one `LogicalPlan` per node from its
 //! already translated inputs ([`operator`]), and returns the plan of the terminal (last) node.
 //! Expressions and predicates inside operators go through [`crate::expressions`].
+//!
+//! Most operators lower lazily into the `LogicalPlan`. Three need data while the plan is being
+//! built, so they run their inputs first and splice the result in as an in-memory table:
+//!
+//! - `RelationSource` reads a relation retained by a scoped executor ([`relation`]).
+//! - `DynamicScan` reads the files named by its input's rows ([`operator`]).
+//! - `WriteJson` writes its inputs to a file and yields the file's metadata ([`write_json`]).
 
 use std::sync::Arc;
 
+use datafusion::arrow::array::RecordBatch;
+use datafusion::arrow::compute::{can_cast_types, cast};
+use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datafusion::common::DataFusionError;
+use datafusion::datasource::{MemTable, provider_as_source};
 use datafusion::execution::context::SessionContext;
-use datafusion::logical_expr::LogicalPlan;
+use datafusion::logical_expr::{LogicalPlan, LogicalPlanBuilder, ident};
 use delta_kernel::KernelResult as DeltaResult;
 use delta_kernel::plans::PlanResult;
 use delta_kernel::plans::ir::plan::Plan;
 
 use crate::{DataFusionPlanExecutor, ExecutorError};
 
+mod dynamic_scan;
 pub mod operator;
+pub mod relation;
 pub mod scan;
+pub mod write_json;
 
 /// Translates `plan`, runs it on a session built from the executor's task context, and streams
 /// the terminal node's rows as [`PlanResult::Data`].
 pub fn execute(executor: &DataFusionPlanExecutor, plan: Plan) -> DeltaResult<PlanResult> {
     let logical = to_logical_plan(executor, &plan)?;
-    let ctx = executor.task_ctx();
-    let mut config = ctx.session_config().clone();
-
-    // A scan gives every file its own partition. Splitting a file further by byte range would
-    // interleave its rows, and the kernel's handler contract wants them in file order.
-    config.options_mut().optimizer.repartition_file_scans = false;
-    let session = SessionContext::new_with_config_rt(config, ctx.runtime_env());
+    let session = session(executor);
     let handle = crate::runtime::query_handle(executor.handle())?;
     let stream = crate::runtime::block_on(&handle, async move {
         session
@@ -43,6 +51,107 @@ pub fn execute(executor: &DataFusionPlanExecutor, plan: Plan) -> DeltaResult<Pla
     Ok(PlanResult::Data(crate::stream::into_engine_data(
         &handle, stream,
     )))
+}
+
+/// The session plans run on: the executor's task context with file scans kept whole.
+fn session(executor: &DataFusionPlanExecutor) -> SessionContext {
+    let ctx = executor.task_ctx();
+    let mut config = ctx.session_config().clone();
+
+    // A scan gives every file its own partition. Splitting a file further by byte range would
+    // interleave its rows, and the kernel's handler contract wants them in file order.
+    config.options_mut().optimizer.repartition_file_scans = false;
+    SessionContext::new_with_config_rt(config, ctx.runtime_env())
+}
+
+/// Runs `logical` to completion and returns all of its batches.
+///
+/// Used by the operators that need their input's rows while the plan is being lowered. It
+/// blocks the calling thread, like [`execute`] does while it waits for the stream.
+pub(crate) fn collect(
+    executor: &DataFusionPlanExecutor,
+    logical: LogicalPlan,
+) -> crate::Result<Vec<RecordBatch>> {
+    let session = session(executor);
+    let handle = crate::runtime::query_handle(executor.handle())?;
+    Ok(crate::runtime::block_on(&handle, async move {
+        session.execute_logical_plan(logical).await?.collect().await
+    })?)
+}
+
+/// A `LogicalPlan` that reads `batches`, with unqualified fields like every other operator's.
+pub(crate) fn memory_plan(
+    table_name: &str,
+    schema: ArrowSchemaRef,
+    batches: Vec<RecordBatch>,
+) -> crate::Result<LogicalPlan> {
+    let columns = schema
+        .fields()
+        .iter()
+        .map(|field| ident(field.name()).alias(field.name()))
+        .collect::<Vec<_>>();
+    let table = MemTable::try_new(Arc::clone(&schema), vec![batches])?;
+    Ok(
+        LogicalPlanBuilder::scan(table_name, provider_as_source(Arc::new(table)), None)?
+            .project(columns)?
+            .build()?,
+    )
+}
+
+/// Rebuilds `batch` with `schema`, the schema the kernel declared for it.
+///
+/// DataFusion may report a column as nullable, or a nested field with another nullability or
+/// name, where the kernel declared it otherwise. Such a column is cast to the declared type; a
+/// column whose type cannot be cast, or a NULL in a non-nullable field, is an error.
+pub(crate) fn conform_batch(
+    batch: &RecordBatch,
+    schema: &ArrowSchemaRef,
+) -> crate::Result<RecordBatch> {
+    if batch.schema_ref() == schema {
+        return Ok(batch.clone());
+    }
+    if batch.num_columns() != schema.fields().len() {
+        return Err(ExecutorError::Kernel(delta_kernel::KernelError::schema(
+            format!(
+                "a batch with {} column(s) does not match the declared schema with {}",
+                batch.num_columns(),
+                schema.fields().len()
+            ),
+        )));
+    }
+    let columns = batch
+        .columns()
+        .iter()
+        .zip(batch.schema_ref().fields())
+        .zip(schema.fields())
+        .map(|((column, actual), declared)| {
+            if actual.name() != declared.name() {
+                return Err(ExecutorError::Kernel(delta_kernel::KernelError::schema(
+                    format!(
+                        "column `{}` does not match the declared column `{}`",
+                        actual.name(),
+                        declared.name()
+                    ),
+                )));
+            }
+            if column.data_type() == declared.data_type() {
+                Ok(Arc::clone(column))
+            } else if can_cast_types(column.data_type(), declared.data_type()) {
+                Ok(cast(column, declared.data_type())?)
+            } else {
+                Err(ExecutorError::Kernel(delta_kernel::KernelError::schema(
+                    format!(
+                        "column `{}` has type {}, not the declared {}",
+                        declared.name(),
+                        column.data_type(),
+                        declared.data_type()
+                    ),
+                )))
+            }
+        })
+        .collect::<crate::Result<Vec<_>>>()?;
+    RecordBatch::try_new(Arc::clone(schema), columns)
+        .map_err(|err| delta_kernel::KernelError::schema(err.to_string()).into())
 }
 
 /// Translates `plan` into the `LogicalPlan` of its terminal node.

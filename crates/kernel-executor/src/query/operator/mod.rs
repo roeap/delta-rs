@@ -1,9 +1,9 @@
 //! Translates one kernel [`Operator`] into a DataFusion `LogicalPlan`.
 //!
 //! Each kernel operator has one function here. The function receives the already translated
-//! inputs in the order [`PlanNode::inputs`] lists them. Scans need the executor for its object
-//! stores; every other operator is a pure function of its inputs and goes through
-//! [`lower_operator`].
+//! inputs in the order [`PlanNode::inputs`] lists them. Scans, relation sources and writes need
+//! the executor (object stores, retained relations, eager input runs); every other operator is a
+//! pure function of its inputs and goes through [`lower_operator`].
 
 use std::sync::Arc;
 
@@ -19,16 +19,16 @@ use datafusion::logical_expr::{
 use delta_kernel::engine::arrow_conversion::{TryIntoArrow, TryIntoKernel};
 use delta_kernel::expressions::{ColumnName, Scalar};
 use delta_kernel::plans::ir::nodes::{
-    Agg, Aggregate, DynamicScan, FileType, Filter, Operator, Project, ScanJson, ScanParquet,
-    SemiJoin, UnionAll, Values,
+    Agg, Aggregate, FileType, Filter, Operator, Project, ScanJson, ScanParquet, SemiJoin, UnionAll,
+    Values,
 };
 use delta_kernel::schema::{StructField, StructType};
 
 use super::scan;
+use crate::DataFusionPlanExecutor;
 use crate::expressions::{
     column_to_df_expr, to_datafusion_predicate_expr, to_datafusion_scalar, to_df_struct_columns,
 };
-use crate::{DataFusionPlanExecutor, ExecutorError};
 
 /// Dispatches `op` to the function that translates it.
 pub fn to_logical_plan(
@@ -39,7 +39,27 @@ pub fn to_logical_plan(
     match op {
         Operator::ScanParquet(op) => scan_parquet(op),
         Operator::ScanJson(op) => scan_json(op),
-        Operator::DynamicScan(op) => dynamic_scan(executor, op, inputs),
+        Operator::DynamicScan(op) => {
+            let [input] = inputs else {
+                return Err(DataFusionError::Plan(format!(
+                    "dynamic_scan expects 1 input(s), but received {}",
+                    inputs.len()
+                ))
+                .into());
+            };
+            super::dynamic_scan::lower_dynamic_scan(executor, op, input)
+        }
+        Operator::RelationSource(relation) => {
+            if !inputs.is_empty() {
+                return Err(DataFusionError::Plan(format!(
+                    "relation_source expects 0 input(s), but received {}",
+                    inputs.len()
+                ))
+                .into());
+            }
+            super::relation::lower_relation_source(executor, relation)
+        }
+        Operator::WriteJson(op) => super::write_json::lower_write_json(executor, op, inputs),
         _ => Ok(lower_operator(op, inputs)?),
     }
 }
@@ -106,7 +126,8 @@ pub(crate) fn lower_operator(op: &Operator, inputs: &[Arc<LogicalPlan>]) -> DFRe
             lower_semi_join(semi_join, probe, build)
         }
         Operator::UnionAll(union_all) => lower_union_all(union_all, inputs),
-        // The scans go through `to_logical_plan`, which has the executor they need.
+        // Scans, relation sources and writes go through `to_logical_plan`, which has the executor
+        // they need.
         _ => Err(DataFusionError::NotImplemented(format!(
             "lowering operator {} to a DataFusion LogicalPlan",
             name(op)
@@ -216,15 +237,6 @@ fn lower_filter(filter: &Filter, input: &Arc<LogicalPlan>) -> DFResult<LogicalPl
         .map_err(|error| DataFusionError::External(Box::new(error)))?;
     let filter = DFFilter::try_new(predicate, Arc::clone(input))?;
     Ok(LogicalPlan::Filter(filter))
-}
-
-/// Unary: scans the files named by the input rows.
-fn dynamic_scan(
-    _executor: &DataFusionPlanExecutor,
-    _op: &DynamicScan,
-    _inputs: &[Arc<LogicalPlan>],
-) -> crate::Result<LogicalPlan> {
-    Err(ExecutorError::unsupported("operator dynamic_scan"))
 }
 
 /// Lowers an [`Aggregate`](Aggregate) to a DataFusion aggregate over its input.
