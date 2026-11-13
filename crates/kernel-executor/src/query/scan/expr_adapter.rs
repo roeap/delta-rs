@@ -77,7 +77,7 @@ fn relax_field(field: &FieldRef) -> FieldRef {
     Arc::new(relax_field_type(field).as_ref().clone().with_nullable(true))
 }
 
-fn relax_nested_nullability(dt: &DataType) -> DataType {
+pub(crate) fn relax_nested_nullability(dt: &DataType) -> DataType {
     match dt {
         DataType::Struct(fields) => DataType::Struct(fields.iter().map(relax_field).collect()),
         DataType::List(f) => DataType::List(relax_field(f)),

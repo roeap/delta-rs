@@ -19,6 +19,7 @@ use datafusion::arrow::compute::{can_cast_types, cast};
 use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datafusion::common::DataFusionError;
 use datafusion::datasource::{MemTable, provider_as_source};
+use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::{LogicalPlan, LogicalPlanBuilder, ident};
 use delta_kernel::KernelResult as DeltaResult;
@@ -27,6 +28,7 @@ use delta_kernel::plans::ir::plan::Plan;
 
 use crate::{DataFusionPlanExecutor, ExecutorError};
 
+mod declared_cast;
 mod dynamic_scan;
 pub mod operator;
 pub mod relation;
@@ -61,8 +63,31 @@ fn session(executor: &DataFusionPlanExecutor) -> SessionContext {
     // A scan gives every file its own partition. Splitting a file further by byte range would
     // interleave its rows, and the kernel's handler contract wants them in file order.
     config.options_mut().optimizer.repartition_file_scans = false;
-    SessionContext::new_with_config_rt(config, ctx.runtime_env())
+    let state = SessionStateBuilder::new()
+        .with_config(config)
+        .with_runtime_env(ctx.runtime_env())
+        .with_default_features()
+        .build();
+    let rules = state
+        .optimizers()
+        .iter()
+        .filter(|rule| !LEAF_PUSHDOWN_RULES.contains(&rule.name()))
+        .cloned()
+        .collect();
+    let state = SessionStateBuilder::new_from_existing(state)
+        .with_optimizer_rules(rules)
+        .build();
+    SessionContext::new_with_state(state)
 }
+
+/// Optimizer rules the executor's sessions leave out.
+///
+/// DataFusion 55's leaf-expression pushdown fails with `DuplicateUnqualifiedField` when it moves
+/// a `get_field` below a projection that renames its input's columns, which every lowered scan
+/// has (`scan_json.add AS add`). Kernel's metadata scan plan (`Scan::declarative_metadata_scan_plan`)
+/// hits it on every table. Fixed upstream by apache/datafusion#25478 (issue #25446), which
+/// first ships in DataFusion 56; restore the rules with that upgrade.
+const LEAF_PUSHDOWN_RULES: &[&str] = &["extract_leaf_expressions", "push_down_leaf_projections"];
 
 /// Runs `logical` to completion and returns all of its batches.
 ///

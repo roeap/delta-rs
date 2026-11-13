@@ -24,6 +24,7 @@ use delta_kernel::plans::ir::nodes::{
 };
 use delta_kernel::schema::{StructField, StructType};
 
+use super::declared_cast::{declared_cast, differs_only_in_nested_nullability};
 use super::scan;
 use crate::DataFusionPlanExecutor;
 use crate::expressions::{
@@ -220,8 +221,14 @@ fn lower_project(project: &Project, input: &Arc<LogicalPlan>) -> DFResult<Logica
         .zip(project.schema.fields())
         .map(|((name, expr), field)| {
             let target = field.data_type().try_into_arrow()?;
-            let expr = expr.cast_to(&target, input.schema())?.alias(name);
-            Ok(expr)
+            let source = expr.get_type(input.schema())?;
+            let expr = if differs_only_in_nested_nullability(&source, &target) {
+                // DataFusion's CAST refuses to tighten nested nullability; see `declared_cast`.
+                declared_cast(expr, target)
+            } else {
+                expr.cast_to(&target, input.schema())?
+            };
+            Ok(expr.alias(name))
         })
         .collect();
 
@@ -371,17 +378,40 @@ fn lower_semi_join(
         )));
     }
 
+    // A semi join reads only the build side's keys. Kernel plans often join relations that share
+    // column names (the metadata scan anti-joins checkpoint adds against the commit replay, and
+    // both sides have `add` and `file_action_key`), and a join over two inputs with the same
+    // field is valid only while nothing recomputes its schema, which DataFusion's optimizer does
+    // (`push_down_leaf_projections`). So the build side is narrowed to its keys, under names the
+    // probe side does not use.
     let probe_schema = probe.schema().as_ref();
     let build_schema = build.schema().as_ref();
-    let join_keys: DFResult<Vec<_>> = semi_join
+    let key_name = |index: usize| {
+        let mut name = format!("__semi_join_build_key_{index}");
+        while probe_schema.has_column_with_unqualified_name(&name) {
+            name.insert(0, '_');
+        }
+        name
+    };
+    let mut probe_keys = Vec::with_capacity(semi_join.probe_keys.len());
+    let mut build_keys = Vec::with_capacity(semi_join.build_keys.len());
+    for (index, (probe_key, build_key)) in semi_join
         .probe_keys
         .iter()
         .zip(&semi_join.build_keys)
-        .map(|(probe_key, build_key)| {
-            let probe_key = column_to_df_expr(probe_key, probe_schema)?;
-            let build_key = column_to_df_expr(build_key, build_schema)?;
-            Ok((probe_key, build_key))
-        })
+        .enumerate()
+    {
+        let name = key_name(index);
+        probe_keys.push(column_to_df_expr(probe_key, probe_schema)?);
+        build_keys.push(column_to_df_expr(build_key, build_schema)?.alias(&name));
+    }
+    let build_side = LogicalPlanBuilder::from(Arc::clone(build))
+        .project(build_keys.iter().cloned())?
+        .build()?;
+    let on = probe_keys
+        .into_iter()
+        .zip(build_side.schema().columns())
+        .map(|(probe_key, build_key)| (probe_key, Expr::Column(build_key)))
         .collect();
 
     let join_type = if semi_join.inverted {
@@ -390,19 +420,17 @@ fn lower_semi_join(
         JoinType::LeftSemi
     };
 
-    let mut join = DFJoin::try_new(
+    // Left semi and anti joins output only the probe side's columns.
+    let join = DFJoin::try_new(
         Arc::clone(probe),
-        Arc::clone(build),
-        join_keys?,
+        Arc::new(build_side),
+        on,
         None,
         join_type,
         JoinConstraint::On,
         NullEquality::NullEqualsNull,
         false,
     )?;
-    // Left semi and anti joins output only probe columns, so retain the probe schema.
-    join.schema = Arc::clone(probe.schema());
-
     Ok(LogicalPlan::Join(join))
 }
 

@@ -1056,3 +1056,110 @@ async fn union_of_json_and_parquet_scans_aggregates() {
     assert_eq!(longs(&batches, "x"), [Some(3)], "x from the newest version");
     assert_eq!(longs(&batches, "newest"), [Some(8)]);
 }
+
+/// The shape of kernel's metadata scan plan (`Scan::declarative_metadata_scan_plan`): a log scan,
+/// a filter on a nested field, and a projection that builds a key struct whose nullable
+/// `deletionVector` has non-nullable children. Two DataFusion 55 behaviors break it: leaf
+/// expression pushdown fails below the scan's renaming projection (apache/datafusion#25446),
+/// and `CAST` refuses to tighten nested nullability.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_scan_shape_plans_and_runs() {
+    use delta_kernel::expressions::{Expression, Predicate, column_expr};
+    use delta_kernel::plans::PlanResult;
+
+    let dir = tempfile::tempdir().unwrap();
+    let log = write_json(
+        dir.path(),
+        "00000.json",
+        &[
+            r#"{"add": {"path": "a.parquet", "deletionVector": null}}"#,
+            r#"{"add": {"path": "b.parquet", "deletionVector": {"storageType": "u", "offset": 1}}}"#,
+            r#"{"remove": {"path": "c.parquet"}}"#,
+        ],
+    );
+    let dv_read = DataType::from(schema([
+        StructField::nullable("storageType", DataType::STRING),
+        StructField::nullable("offset", DataType::INTEGER),
+    ]));
+    let log_schema = Arc::new(schema([
+        StructField::nullable(
+            "add",
+            schema([
+                StructField::nullable("path", DataType::STRING),
+                StructField::nullable("deletionVector", dv_read),
+            ]),
+        ),
+        StructField::nullable(
+            "remove",
+            schema([StructField::nullable("path", DataType::STRING)]),
+        ),
+    ]));
+    // The declared key: a nullable DV struct whose children are set whenever it is.
+    let dv_key = DataType::from(schema([
+        StructField::not_null("storageType", DataType::STRING),
+        StructField::nullable("offset", DataType::INTEGER),
+    ]));
+    let key_schema = Arc::new(schema([StructField::nullable(
+        "key",
+        schema([
+            StructField::nullable("path", DataType::STRING),
+            StructField::nullable("deletionVector", dv_key),
+        ]),
+    )]));
+    let key = Expression::struct_from([Expression::struct_from([
+        Arc::new(column_expr!("add.path")),
+        Arc::new(Expression::struct_with_nullability_from(
+            [
+                column_expr!("add.deletionVector.storageType"),
+                column_expr!("add.deletionVector.offset"),
+            ],
+            Expression::from(Predicate::is_not_null(column_expr!(
+                "add.deletionVector.storageType"
+            ))),
+        )),
+    ])]);
+    let plan = PlanBuilder::scan_json([scan_file(&log, vec![])], &[], log_schema)
+        .unwrap()
+        .filter(Predicate::is_not_null(column_expr!("add.path")))
+        .unwrap()
+        .project(key, key_schema)
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let executor = executor();
+    let batches: Vec<RecordBatch> = tokio::task::spawn_blocking(move || {
+        let PlanResult::Data(data) = executor.execute_op(Operation::QueryPlan(plan)).unwrap()
+        else {
+            panic!("a query plan returns data");
+        };
+        data.map(|batch| {
+            ArrowEngineData::try_from_engine_data(batch.unwrap())
+                .unwrap()
+                .record_batch()
+                .clone()
+        })
+        .collect()
+    })
+    .await
+    .unwrap();
+
+    let keys: Vec<_> = batches
+        .iter()
+        .flat_map(|batch| {
+            let key = batch.column(0).as_struct();
+            let paths = key.column(0).as_string::<i32>();
+            let dvs = key.column(1).as_struct();
+            (0..batch.num_rows())
+                .map(|row| (paths.value(row).to_string(), dvs.is_valid(row)))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            ("a.parquet".to_string(), false),
+            ("b.parquet".to_string(), true)
+        ]
+    );
+}

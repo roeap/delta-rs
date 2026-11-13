@@ -1737,17 +1737,37 @@ fn semi_join_lowers_with_declared_schema_and_null_safe_semantics(
     )
     .unwrap();
 
+    // The output is the probe's columns; the build side is narrowed to its keys.
     assert_eq!(lowered.schema(), probe.schema());
     let LogicalPlan::Join(join) = &lowered else {
         panic!("expected Join, got {lowered:?}");
     };
     assert!(Arc::ptr_eq(&join.left, &probe));
-    assert!(Arc::ptr_eq(&join.right, &build));
+    let LogicalPlan::Projection(build_keys) = join.right.as_ref() else {
+        panic!(
+            "expected the build side's key projection, got {:?}",
+            join.right
+        );
+    };
+    assert_eq!(build_keys.input.as_ref(), build.as_ref());
+    assert_eq!(
+        build_keys.expr,
+        [
+            col("a").alias("__semi_join_build_key_0"),
+            col("b").alias("__semi_join_build_key_1"),
+        ]
+    );
     assert_eq!(join.join_type, expected_join_type);
     assert_eq!(join.join_constraint, JoinConstraint::On);
     assert_eq!(join.null_equality, NullEquality::NullEqualsNull);
     assert!(!join.null_aware);
-    assert_eq!(join.on, [(col("a"), col("a")), (col("b"), col("b")),]);
+    assert_eq!(
+        join.on,
+        [
+            (col("a"), col("__semi_join_build_key_0")),
+            (col("b"), col("__semi_join_build_key_1")),
+        ]
+    );
     assert_eq!(join.schema.as_ref(), probe.schema().as_ref());
 }
 
@@ -2223,4 +2243,62 @@ fn union_all_rejects_different_input_schemas() {
             .contains("requires all inputs to have the same schema"),
         "{err}"
     );
+}
+
+/// Kernel's metadata scan plan anti-joins checkpoint adds against the commit replay, and both
+/// sides carry the same column names (`add`, `file_action_key`). The join must still plan
+/// once DataFusion's optimizer rebuilds it, and nested field access above it must resolve to
+/// the probe side.
+#[rstest]
+#[case::semi(false, &["+------+", "| path |", "+------+", "| b    |", "+------+"])]
+#[case::anti(true, &["+------+", "| path |", "+------+", "| a    |", "+------+"])]
+#[tokio::test]
+async fn semi_join_with_shared_column_names_plans_and_projects_probe_fields(
+    #[case] inverted: bool,
+    #[case] expected: &[&str],
+) {
+    let add = DataType::from(
+        StructType::try_new([StructField::nullable("path", DataType::STRING)]).unwrap(),
+    );
+    let schema = StructType::try_new([
+        StructField::nullable("key", DataType::LONG),
+        StructField::nullable("add", add.clone()),
+    ])
+    .unwrap();
+    let add_row = |path: &str| {
+        KernelScalar::Struct(
+            KernelStructData::try_new(
+                vec![StructField::nullable("path", DataType::STRING)],
+                vec![path.into()],
+            )
+            .unwrap(),
+        )
+    };
+    let probe = Arc::new(
+        lower_values_node(
+            schema.clone(),
+            vec![
+                vec![1i64.into(), add_row("a")],
+                vec![2i64.into(), add_row("b")],
+            ],
+        )
+        .unwrap(),
+    );
+    let build =
+        Arc::new(lower_values_node(schema, vec![vec![2i64.into(), add_row("other")]]).unwrap());
+    let semi_join = SemiJoin {
+        inverted,
+        probe_keys: vec![column_name!("key")],
+        build_keys: vec![column_name!("key")],
+    };
+    let joined = Arc::new(lower_operator(&Operator::SemiJoin(semi_join), &[probe, build]).unwrap());
+    let project = Project {
+        expr: KernelExpr::struct_from([column_expr!("add.path")]).into(),
+        schema: Arc::new(
+            StructType::try_new([StructField::nullable("path", DataType::STRING)]).unwrap(),
+        ),
+    };
+    let projected = lower_operator(&Operator::Project(project), &[joined]).unwrap();
+    let batches = execute(projected).await.unwrap();
+    assert_batches_sorted_eq!(expected, &batches);
 }
